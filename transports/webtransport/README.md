@@ -22,6 +22,17 @@ Example listen multiaddr:
 /ip4/127.0.0.1/udp/4433/quic-v1/webtransport/certhash/uEi...
 ```
 
+## Limitations
+
+- **No DCUtR hole punching.** A coordinated hole-punch dial
+  (`DialOpts { role: Endpoint::Listener, port_use: PortUse::New }`) fails with
+  `Error::HolePunchingUnsupported`: `wtransport`'s client endpoint always binds a fresh socket and
+  cannot dial from the listener's socket.
+- **`PortUse::Reuse` is not honoured.** Ordinary dials always bind a fresh ephemeral socket; the
+  reuse request is downgraded best-effort and logged at `trace`.
+
+Both stem from the `wtransport` API, which only exposes `connect` on a client endpoint.
+
 ## License
 
 Licensed under MIT.
