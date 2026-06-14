@@ -307,6 +307,11 @@ jobs:
         with:
           shared-key: semver
       - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          # libp2p-webtransport is a brand-new crate with no crates.io release to
+          # use as a baseline yet. Exclude it until its first publish establishes
+          # one; afterwards this exclusion can be removed.
+          exclude: libp2p-webtransport
 
   rustfmt:
     runs-on: ubuntu-latest
