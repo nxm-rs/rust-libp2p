@@ -12,7 +12,10 @@ concurrency:
 jobs:
   run-transport-interop:
     name: Run transport interoperability tests
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # Only run on the upstream repository: these cross-implementation interop tests use the
+    # libp2p/test-plans framework (self-hosted runners, build caches, multi-impl orchestration)
+    # that forks cannot provide, so they cannot pass on a fork regardless of the change.
+    if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && github.repository == 'libp2p/rust-libp2p'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -44,7 +47,10 @@ jobs:
           worker-count: 16
   run-holepunching-interop:
     name: Run hole-punch interoperability tests
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # Only run on the upstream repository: these cross-implementation interop tests use the
+    # libp2p/test-plans framework (self-hosted runners, build caches, multi-impl orchestration)
+    # that forks cannot provide, so they cannot pass on a fork regardless of the change.
+    if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && github.repository == 'libp2p/rust-libp2p'
     runs-on: ${{ fromJSON(github.repository == 'libp2p/rust-libp2p' && '["self-hosted", "linux", "x64", "4xlarge"]' || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v5

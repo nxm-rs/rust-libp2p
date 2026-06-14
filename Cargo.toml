@@ -168,6 +168,16 @@ web-time = "1.1.0"
 # This is expected to stay here until we move `libp2p-identity` to a separate repository which makes the dependency relationship more obvious.
 libp2p-identity = { path = "identity" }
 
+# wtransport 0.7.1 encodes HTTP/3 pseudo-headers in `HashMap` order, which can place a regular
+# header before the pseudo-headers, violating RFC 9114 §4.3. go-libp2p (quic-go) then rejects the
+# WebTransport CONNECT request stream with H3_MESSAGE_ERROR, so native dials to go-libp2p fail.
+# (The companion lowercase-header-name fix lives in transports/webtransport/src/transport.rs.)
+# Pinned to our own fork carrying the fix from BiagioFesta/wtransport#310 — by rev, on a repo we
+# control, so the ref can't be force-pushed or deleted out from under us.
+# TODO: drop once a wtransport release contains the header-ordering fix.
+wtransport = { git = "https://github.com/mfw78/wtransport.git", rev = "8ebdde112e3e7dd558e662a2e7ebc147e2547112" }
+wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", rev = "8ebdde112e3e7dd558e662a2e7ebc147e2547112" }
+
 [workspace.lints]
 rust.unreachable_pub = "warn"
 clippy.used_underscore_binding = "warn"
