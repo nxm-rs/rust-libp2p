@@ -176,6 +176,9 @@ impl Keypair {
     /// Sign a message using the private key of this keypair, producing
     /// a signature that can be verified using the corresponding public key.
     #[allow(unused_variables)]
+    // With only some key-type features enabled every match arm is infallible, so newer clippy
+    // (>=1.94) flags the `Result` as unnecessary; CI pins an older clippy where it does not fire.
+    #[allow(clippy::unnecessary_wraps)]
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
         match self.keypair {
             #[cfg(feature = "ed25519")]
@@ -212,6 +215,9 @@ impl Keypair {
     }
 
     /// Encode a private key as protobuf structure.
+    // With only some key-type features enabled every match arm is infallible, so newer clippy
+    // (>=1.94) flags the `Result` as unnecessary; CI pins an older clippy where it does not fire.
+    #[allow(clippy::unnecessary_wraps)]
     pub fn to_protobuf_encoding(&self) -> Result<Vec<u8>, DecodingError> {
         #[cfg(any(
             feature = "ecdsa",
@@ -380,6 +386,9 @@ impl Keypair {
 
     /// Return the secret key of the [`Keypair`].
     #[allow(dead_code)]
+    // With only some key-type features enabled every match arm yields `Some`, so newer clippy
+    // (>=1.94) flags the `Option` as unnecessary; CI pins an older clippy where it does not fire.
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn secret(&self) -> Option<[u8; 32]> {
         match self.keypair {
             #[cfg(feature = "ed25519")]
