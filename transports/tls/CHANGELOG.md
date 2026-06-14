@@ -1,5 +1,8 @@
 ## 0.7.0
 
+- Add WebTransport support helpers: the `P2P_ALPN` constant is now public, and a new
+  `make_webtransport_server_config` function supports the native `libp2p-webtransport` transport.
+
 - Replace deprecated `webpki::Error` variants with their new context-based equivalents.
   See [PR 6355](https://github.com/libp2p/rust-libp2p/pull/6355).
 
