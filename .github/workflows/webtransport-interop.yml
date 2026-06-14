@@ -54,7 +54,6 @@ jobs:
     name: rust-native -> go-libp2p (known limitation)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
@@ -76,10 +75,19 @@ jobs:
         working-directory: wasm-tests/webtransport-tests/echo-server
         run: go build -o echo-server .
 
-      - name: Dial go-libp2p from a native rust node
+      - name: Dial go-libp2p from a native rust node (known limitation, non-blocking)
         env:
           GO_ECHO_SERVER: ${{ github.workspace }}/wasm-tests/webtransport-tests/echo-server/echo-server
-        run: cargo test -p libp2p-webtransport --test interop_go -- --ignored --nocapture
+        # wtransport 0.7 speaks a newer WebTransport-over-HTTP/3 revision than go-libp2p's
+        # draft-02, so the dialer aborts the session. This is tracked, not a regression; surface
+        # it as a warning rather than failing the run. If the test starts passing, the limitation
+        # has been resolved and the `|| true` can be dropped.
+        run: |
+          if cargo test -p libp2p-webtransport --test interop_go -- --ignored --nocapture; then
+            echo "rust-native -> go-libp2p interop PASSED (limitation resolved — drop the soft-fail)"
+          else
+            echo "::warning title=Known limitation::rust-native -> go-libp2p WebTransport dialing fails (wtransport newer draft vs go-libp2p draft-02); tracked and non-blocking."
+          fi
 
   # go-libp2p -> rust-native.
   # Runs the native rust echo_server example in the background (serving its
