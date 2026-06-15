@@ -45,6 +45,42 @@ Example listen multiaddr (two certificate hashes):
 /ip4/127.0.0.1/udp/4433/quic-v1/webtransport/certhash/uEi.../certhash/uEi...
 ```
 
+## Configuring the transport
+
+`Config` has private fields and is `#[non_exhaustive]`. Construct it with `Config::new` (single
+certificate), `Config::new_with_certs`, or `Config::generate` (current+next pair), then tune it with
+the chained `mut self -> Self` setters (mirroring `libp2p-quic`'s `Config`):
+
+```rust,no_run
+use std::time::Duration;
+use libp2p_identity::Keypair;
+use libp2p_webtransport::{Config, Certificate};
+use time::OffsetDateTime;
+
+let keypair = Keypair::generate_ed25519();
+let cert = Certificate::generate(OffsetDateTime::now_utc()).unwrap();
+let config = Config::new(&keypair, cert)
+    .max_idle_timeout(30_000) // milliseconds; 0 means "infinite" — use with care
+    .keep_alive_interval(Duration::from_secs(5))
+    .max_concurrent_stream_limit(256)
+    .disable_path_mtu_discovery();
+```
+
+`Config` deliberately has no `Debug` impl: it holds the libp2p keypair and the certificate private
+keys, which must not be logged.
+
+## Persisting the certificate
+
+`Certificate::to_bytes` / `Certificate::parse` serialize and restore a certificate (with its private
+key and validity window) across restarts. The format begins with a single version byte
+(`SERIALIZATION_VERSION`); `parse` is total (never panics, bounds its allocations) and rejects a
+blob from an incompatible build with `CertificateError::UnsupportedVersion`. Certificates serialized
+before this versioning was introduced are not parseable and must be regenerated.
+
+> **Security:** the serialized blob contains the private key **in the clear** and is not
+> authenticated (the version byte is a compatibility discriminator, not integrity protection). Store
+> it with filesystem-level confidentiality — mode `0600` or a secret store.
+
 ## License
 
 Licensed under MIT.

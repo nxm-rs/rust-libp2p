@@ -197,6 +197,94 @@ async fn native_to_native_ping_pong() {
     assert_eq!(remote_on_dialer, listener_peer_id);
 }
 
+/// A single-certificate transport whose `Config` has been tuned via the chained setters,
+/// including disabling path-MTU discovery.
+fn create_transport_custom_config() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
+    let keypair = Keypair::generate_ed25519();
+    let peer_id = keypair.public().to_peer_id();
+    let not_before = OffsetDateTime::now_utc().checked_sub(1.days()).unwrap();
+    let cert = webtransport::Certificate::generate(not_before).expect("generate cert");
+
+    let config = webtransport::Config::new(&keypair, cert)
+        .max_idle_timeout(20_000)
+        .keep_alive_interval(Duration::from_secs(3))
+        .max_concurrent_stream_limit(64)
+        .max_stream_data(1_000_000)
+        .max_connection_data(2_000_000)
+        .handshake_timeout(Duration::from_secs(10))
+        .disable_path_mtu_discovery();
+
+    let transport = webtransport::Transport::new(config)
+        .map(|(peer, conn), _| (peer, StreamMuxerBox::new(conn)))
+        .boxed();
+    (peer_id, transport)
+}
+
+/// A single-certificate transport whose certificate was round-tripped through
+/// `to_bytes`/`parse` (i.e. persisted and restored), exercising the stabilized serialization.
+fn create_transport_from_serialized_cert() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
+    let keypair = Keypair::generate_ed25519();
+    let peer_id = keypair.public().to_peer_id();
+    let not_before = OffsetDateTime::now_utc().checked_sub(1.days()).unwrap();
+    let cert = webtransport::Certificate::generate(not_before).expect("generate cert");
+
+    // Persist and restore the certificate via the versioned serialization format.
+    let bytes = cert.to_bytes();
+    let restored = webtransport::Certificate::parse(&bytes).expect("parse round-trips");
+
+    let config = webtransport::Config::new(&keypair, restored);
+    let transport = webtransport::Transport::new(config)
+        .map(|(peer, conn), _| (peer, StreamMuxerBox::new(conn)))
+        .boxed();
+    (peer_id, transport)
+}
+
+/// A native node whose `Config` was tuned via the public setters (and with path-MTU discovery
+/// disabled) still completes the handshake and a stream echo.
+#[tokio::test]
+async fn native_to_native_with_custom_config() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    let (listener_peer_id, mut listener) = create_transport_custom_config();
+    let (dialer_peer_id, dialer) = create_transport_custom_config();
+
+    let listen_addr =
+        start_listening(&mut listener, "/ip4/127.0.0.1/udp/0/quic-v1/webtransport").await;
+    let dial_addr = listen_addr.with(Protocol::P2p(listener_peer_id));
+
+    let (remote_on_listener, remote_on_dialer) = run_ping_pong(listener, dialer, dial_addr)
+        .await
+        .expect("custom-config ping-pong succeeds");
+
+    assert_eq!(remote_on_listener, dialer_peer_id);
+    assert_eq!(remote_on_dialer, listener_peer_id);
+}
+
+/// A listener whose certificate was persisted (`to_bytes`) and restored (`parse`) serves the same
+/// pinned `/certhash`, so a dialer connects and echoes successfully.
+#[tokio::test]
+async fn native_to_native_with_serialized_cert() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    let (listener_peer_id, mut listener) = create_transport_from_serialized_cert();
+    let (dialer_peer_id, dialer) = create_transport();
+
+    let listen_addr =
+        start_listening(&mut listener, "/ip4/127.0.0.1/udp/0/quic-v1/webtransport").await;
+    let dial_addr = listen_addr.with(Protocol::P2p(listener_peer_id));
+
+    let (remote_on_listener, remote_on_dialer) = run_ping_pong(listener, dialer, dial_addr)
+        .await
+        .expect("serialized-cert ping-pong succeeds");
+
+    assert_eq!(remote_on_listener, dialer_peer_id);
+    assert_eq!(remote_on_dialer, listener_peer_id);
+}
+
 // B9: after the dialer closes its *send* (write) half, it must still read a full reply the
 // listener writes. Pre-fix, `poll_read` consulted the send-half close state and fabricated a clean
 // EOF (`Ok(0)`), truncating the read. This exercises the reachable path: a local `close()` of the
