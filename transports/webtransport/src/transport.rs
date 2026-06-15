@@ -69,29 +69,50 @@ impl libp2p_core::Transport for Transport {
     type ListenerUpgrade = Connecting;
     type Dial = BoxFuture<'static, Result<Self::Output, Self::Error>>;
 
+    /// Start listening on `addr`.
+    ///
+    /// `addr` must be of the form `/ip{4,6}/<ip>/udp/<port>/quic-v1/webtransport` and may
+    /// optionally end with `/p2p/<peer-id>`. If a `/p2p/<peer-id>` is present it **must** equal the
+    /// local peer id; a foreign peer id (or an address carrying more than one `/p2p/`) is rejected
+    /// with [`TransportError::MultiaddrNotSupported`] so transport combinators keep trying. The
+    /// advertised `/certhash` components are managed by the listener and must not be supplied here.
     fn listen_on(
         &mut self,
         id: ListenerId,
         addr: Multiaddr,
     ) -> Result<(), TransportError<Self::Error>> {
-        let (socket_addr, _peer_id) = multiaddr_to_socketaddr(&addr)
+        let (socket_addr, peer_id) = multiaddr_to_socketaddr(&addr)
             .ok_or_else(|| TransportError::MultiaddrNotSupported(addr.clone()))?;
+
+        // A listen address may optionally carry our own `/p2p/<peer-id>` (e.g. when an advertised
+        // address is round-tripped back into `listen_on`). Accept an absent or matching peer id;
+        // reject a genuinely foreign one as unsupported (combinator-friendly) rather than binding
+        // it under the wrong identity. Note this is a *new* policy: neither QUIC nor TCP
+        // validate the listen-side `/p2p/`.
+        if let Some(peer_id) = peer_id {
+            let local_peer_id = self.config.keypair.public().to_peer_id();
+            if peer_id != local_peer_id {
+                return Err(TransportError::MultiaddrNotSupported(addr));
+            }
+        }
+
         let socket = create_socket(socket_addr).map_err(Self::Error::from)?;
 
         let server_tls_config = self.config.server_tls_config();
         let quic_transport_config = self.config.get_quic_transport_config();
 
+        // Hand the single bound socket to wtransport; do not clone it. The bound address is read
+        // back from the endpoint below.
         let config = ServerConfig::builder()
-            .with_bind_socket(
-                socket
-                    .try_clone()
-                    .map_err(|e| TransportError::Other(e.into()))?,
-            )
+            .with_bind_socket(socket)
             .with_custom_tls_and_transport(server_tls_config, quic_transport_config)
             .build();
 
         let endpoint =
             wtransport::Endpoint::server(config).map_err(|e| TransportError::Other(e.into()))?;
+        let local_addr = endpoint
+            .local_addr()
+            .map_err(|e| TransportError::Other(Error::from(e)))?;
         let keypair = &self.config.keypair;
         // The listener owns its own copy of the certificate set and QUIC config so it can rebuild
         // the endpoint TLS config during rotation without holding the (non-`Clone`) `Config`.
@@ -99,11 +120,11 @@ impl libp2p_core::Transport for Transport {
         let quic_params = self.config.quic_params();
         let handshake_timeout = self.config.handshake_timeout;
 
-        tracing::debug!("Listening on {:?}, listenerId {}", &socket, &id);
+        tracing::debug!("Listening on {local_addr}, listenerId {id}");
 
         let listener = Listener::new(
             id,
-            socket,
+            local_addr,
             endpoint,
             keypair,
             certs,
@@ -184,10 +205,11 @@ struct Listener {
     listener_id: ListenerId,
     /// Endpoint
     endpoint: Arc<Endpoint<Server>>,
-    /// The bound UDP socket, retained so rotation can rebuild a full [`ServerConfig`] (via
-    /// `try_clone`) for [`Endpoint::reload_config`] without rebinding or dropping live
-    /// connections.
-    socket: UdpSocket,
+    /// The bound local address, cached from [`Endpoint::local_addr`] at construction. Used to make
+    /// [`Self::socket_addr`] infallible and to supply the bind address to the rebuilt
+    /// [`ServerConfig`] on rotation (where [`Endpoint::reload_config`] with `rebind = false`
+    /// ignores it, so no socket is rebound and live connections are preserved).
+    local_addr: SocketAddr,
     /// Watcher for network interface changes.
     /// None if we are only listening on a single interface.
     if_watcher: Option<IfWatcher>,
@@ -227,10 +249,17 @@ struct Listener {
 }
 
 impl Listener {
+    /// Build a listener around an already-bound endpoint.
+    ///
+    /// Takes `local_addr` (the endpoint's bound address, read by the caller from
+    /// [`Endpoint::local_addr`]) rather than the [`UdpSocket`]: the socket is owned by the endpoint
+    /// and the listener never needs it directly. Caching the address here keeps
+    /// [`Self::socket_addr`] infallible and lets rotation rebuild the [`ServerConfig`] without
+    /// touching the socket.
     #[allow(clippy::too_many_arguments)]
     fn new(
         listener_id: ListenerId,
-        socket: UdpSocket,
+        local_addr: SocketAddr,
         endpoint: Endpoint<Server>,
         keypair: &Keypair,
         certs: Vec<Certificate>,
@@ -246,7 +275,6 @@ impl Listener {
 
         let mut pending_events = VecDeque::new();
         let if_watcher;
-        let local_addr = socket.local_addr()?;
         if local_addr.ip().is_unspecified() {
             if_watcher = Some(IfWatcher::new()?);
         } else {
@@ -264,7 +292,7 @@ impl Listener {
         Ok(Listener {
             listener_id,
             endpoint,
-            socket,
+            local_addr,
             if_watcher,
             accept,
             handshake_timeout,
@@ -317,10 +345,11 @@ impl Listener {
         }
     }
 
+    /// The bound local address. Infallible: cached from [`Endpoint::local_addr`] at construction,
+    /// so this is reachable on every inbound session and interface event without a per-connection
+    /// `.expect()`.
     fn socket_addr(&self) -> SocketAddr {
-        self.endpoint
-            .local_addr()
-            .expect("Cannot fail because the socket is bound")
+        self.local_addr
     }
 
     fn noise_config(&self) -> libp2p_noise::Config {
@@ -492,8 +521,11 @@ impl Listener {
             &self.certs[0].get_private_key_der(),
             alpn_protocols(),
         );
+        // `reload_config(.., false)` ignores the bind address (it does not rebind the socket), so
+        // we pass the cached `local_addr` purely to satisfy the builder; no socket is
+        // created or cloned and live connections are preserved.
         let server_config = ServerConfig::builder()
-            .with_bind_socket(self.socket.try_clone()?)
+            .with_bind_address(self.local_addr)
             .with_custom_tls_and_transport(tls, self.quic_params.build())
             .build();
 
@@ -773,6 +805,12 @@ fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Option<(SocketAddr, Option<PeerI
     for proto in iter {
         match proto {
             Protocol::P2p(id) => {
+                // Reject more than one `/p2p/`: with multiple components the "last wins" behaviour
+                // would let an appended second `/p2p/` flip the identity check the caller performs.
+                if peer_id.is_some() {
+                    tracing::error!("WebTransport listen address {addr} has multiple /p2p/ ids");
+                    return None;
+                }
                 peer_id = Some(id);
             }
             Protocol::WebTransport if !is_webtransport => {
@@ -1002,14 +1040,15 @@ mod test {
         );
         let quic_params = Config::new(&keypair, certs[0].clone()).quic_params();
         let server_config = ServerConfig::builder()
-            .with_bind_socket(socket.try_clone().unwrap())
+            .with_bind_socket(socket)
             .with_custom_tls_and_transport(tls, quic_params.build())
             .build();
         let endpoint = wtransport::Endpoint::server(server_config).unwrap();
+        let local_addr = endpoint.local_addr().unwrap();
 
         let mut listener = Listener::new(
             ListenerId::next(),
-            socket,
+            local_addr,
             endpoint,
             &keypair,
             certs,
@@ -1092,6 +1131,111 @@ mod test {
             );
             assert!(transport.listeners.is_empty());
         }
+    }
+
+    // B2: listening on a concrete loopback address yields a NewAddress with that IP and a nonzero
+    // (kernel-assigned) port, derived from endpoint.local_addr() — no try_clone, no panic path.
+    #[tokio::test]
+    async fn listen_on_concrete_addr() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        transport
+            .listen_on(
+                ListenerId::next(),
+                "/ip4/127.0.0.1/udp/0/quic-v1/webtransport".parse().unwrap(),
+            )
+            .unwrap();
+        match poll_fn(|cx| Pin::new(&mut transport).as_mut().poll(cx)).await {
+            TransportEvent::NewAddress { listen_addr, .. } => {
+                assert!(matches!(
+                    listen_addr.iter().next(),
+                    Some(Protocol::Ip4(a)) if a == Ipv4Addr::LOCALHOST
+                ));
+                assert!(matches!(
+                    listen_addr.iter().nth(1),
+                    Some(Protocol::Udp(port)) if port != 0
+                ));
+            }
+            e => panic!("unexpected event: {e:?}"),
+        }
+    }
+
+    // B2: listening on the IPv6 unspecified address binds without panicking (uses the IfWatcher
+    // path). We only assert the listen call succeeds.
+    #[tokio::test]
+    async fn listen_on_ipv6_unspecified() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        transport
+            .listen_on(
+                ListenerId::next(),
+                "/ip6/::/udp/0/quic-v1/webtransport".parse().unwrap(),
+            )
+            .expect("listening on the ipv6 unspecified address succeeds");
+    }
+
+    // B10: a listen address without `/p2p/` is accepted (the common case).
+    #[tokio::test]
+    async fn listen_on_without_p2p_ok() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        transport
+            .listen_on(
+                ListenerId::next(),
+                "/ip4/127.0.0.1/udp/0/quic-v1/webtransport".parse().unwrap(),
+            )
+            .expect("address without /p2p/ is accepted");
+    }
+
+    // B10: a listen address carrying the *local* peer id is accepted.
+    #[tokio::test]
+    async fn listen_on_with_matching_p2p_ok() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let local_peer_id = keypair.public().to_peer_id();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        let addr: Multiaddr =
+            format!("/ip4/127.0.0.1/udp/0/quic-v1/webtransport/p2p/{local_peer_id}")
+                .parse()
+                .unwrap();
+        transport
+            .listen_on(ListenerId::next(), addr)
+            .expect("address with the local /p2p/ is accepted");
+    }
+
+    // B10/F2: a listen address carrying a *foreign* peer id is rejected as MultiaddrNotSupported
+    // (combinator-friendly), not bound under the wrong identity.
+    #[tokio::test]
+    async fn listen_on_with_foreign_p2p_rejected() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        let foreign = Keypair::generate_ed25519().public().to_peer_id();
+        let addr: Multiaddr = format!("/ip4/127.0.0.1/udp/0/quic-v1/webtransport/p2p/{foreign}")
+            .parse()
+            .unwrap();
+        let res = transport.listen_on(ListenerId::next(), addr.clone());
+        assert!(
+            matches!(res, Err(TransportError::MultiaddrNotSupported(a)) if a == addr),
+            "foreign /p2p/ must be MultiaddrNotSupported"
+        );
+    }
+
+    // B10/F3: a listen address with more than one `/p2p/` is rejected outright (no last-wins flip).
+    #[tokio::test]
+    async fn listen_on_with_two_p2p_rejected() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let local_peer_id = keypair.public().to_peer_id();
+        let other = Keypair::generate_ed25519().public().to_peer_id();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        // Even though the *last* /p2p/ matches the local id, the doubled /p2p/ must be rejected.
+        let addr: Multiaddr =
+            format!("/ip4/127.0.0.1/udp/0/quic-v1/webtransport/p2p/{other}/p2p/{local_peer_id}")
+                .parse()
+                .unwrap();
+        let res = transport.listen_on(ListenerId::next(), addr.clone());
+        assert!(
+            matches!(res, Err(TransportError::MultiaddrNotSupported(a)) if a == addr),
+            "doubled /p2p/ must be MultiaddrNotSupported"
+        );
     }
 
     #[test]

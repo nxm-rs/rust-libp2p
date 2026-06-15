@@ -1,3 +1,37 @@
+## Unreleased
+
+- Correctness & safety fixes.
+
+  - **`Certificate::parse` is now panic-free and bounds its allocations.** The four `.unwrap()`s
+    are replaced by error returns and each length-prefixed field is checked against a 64 KiB cap
+    *before* allocating, so an attacker-supplied length prefix can no longer drive a large
+    allocation. The encoding is now canonical (trailing bytes are rejected). A successful parse is
+    still *not* a semantic validation of the certificate (the timestamp ordering and DER structure
+    are not checked).
+  - **Stream reads no longer depend on the send-half close state.** `Stream::poll_read` delegates
+    solely to the recv half; quinn reports FIN (`Ok(0)`) and reset (`Err`) on the recv half itself.
+    Previously a closed send half could fabricate a clean read EOF. This is a robustness/hygiene
+    fix (the conflation was not remotely triggerable).
+  - **`listen_on` no longer panics on socket-descriptor exhaustion.** The dead `try_clone().unwrap()`
+    is removed; the single bound socket is handed to the endpoint and the listen address is read back
+    from `Endpoint::local_addr()`. The per-connection `socket_addr()` accessor is now infallible
+    (the bound address is cached).
+  - **`listen_on` validates an optional `/p2p/<peer-id>`.** An absent or local-matching peer id is
+    accepted (unchanged for the common case); a foreign peer id, or an address carrying more than
+    one `/p2p/`, is now rejected with `MultiaddrNotSupported` (combinator-friendly). This is a *new*
+    policy — neither the QUIC nor TCP transports validate the listen-side `/p2p/`.
+
+  API notes (crate is unreleased on a feature branch; forward-looking only):
+  - Both `Error` enums (`crate::Error` and `certificate::Error`) are now `#[non_exhaustive]`.
+  - `certificate::Error` gains `InvalidLength`, `InvalidPrivateKey`, `InvalidTimestamp`, and
+    `TrailingData` variants, plus `Display` and `std::error::Error` impls.
+  - `Certificate::parse`'s signature is unchanged; only its failure modes are (it now returns the
+    new error variants instead of panicking).
+  - `Listener::new`'s signature changed (`UdpSocket` → `SocketAddr`) but the type is module-private,
+    so there is no external API impact.
+  - No wire/multiaddr format change. `poll_read` only *fixes* read behaviour; `listen_on` only newly
+    *rejects* foreign-`/p2p/` (and doubled-`/p2p/`) listen addresses.
+
 ## 0.1.0
 
 - Certificate rotation (two-certificate scheme).

@@ -7,14 +7,21 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use wtransport::{RecvStream, SendStream};
 
-/// A single stream on a connection
+/// A single bidirectional stream on a connection.
+///
+/// A QUIC bidirectional stream has two **independent** halves: a send half ([`SendStream`]) and a
+/// recv half ([`RecvStream`]). Reads delegate solely to the recv half — quinn reports a peer FIN as
+/// `Ok(0)` and a peer reset as a propagated `io::Error` on the recv half itself, so the state of
+/// the *send* half must never gate reads. Closing the send half (FIN/`STOP_SENDING`) has no bearing
+/// on what is still readable from the recv half.
 pub struct Stream {
-    /// A send part of the stream
+    /// The send half of the stream.
     send: SendStream,
-    /// A reception part of the stream
+    /// The recv half of the stream. Reports FIN/reset on its own; the sole source of read EOF.
     recv: RecvStream,
-    /// Whether the stream is closed or not
-    close_result: Option<Result<(), io::ErrorKind>>,
+    /// Cached result of shutting down the **send** half, used only to make [`Self::poll_close`]
+    /// idempotent ("fuse"able). Never gates reads.
+    send_close: Option<Result<(), io::ErrorKind>>,
 }
 
 impl Stream {
@@ -22,7 +29,7 @@ impl Stream {
         Self {
             send,
             recv,
-            close_result: None,
+            send_close: None,
         }
     }
 }
@@ -33,11 +40,9 @@ impl futures::AsyncRead for Stream {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        if let Some(close_result) = self.close_result
-            && close_result.is_err()
-        {
-            return Poll::Ready(Ok(0));
-        }
+        // Reads delegate straight to the recv half. The send half's close state is deliberately not
+        // consulted: a closed send half does not imply the recv half is at EOF, and quinn already
+        // signals recv FIN (`Ok(0)`) and reset (`Err`) correctly on the recv half.
         let mut read_buf = ReadBuf::new(buf);
         AsyncRead::poll_read(Pin::new(&mut self.recv), cx, &mut read_buf)
             .map_ok(|()| read_buf.filled().len())
@@ -58,12 +63,14 @@ impl futures::AsyncWrite for Stream {
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if let Some(close_result) = self.close_result {
-            // For some reason poll_close needs to be 'fuse'able
-            return Poll::Ready(close_result.map_err(Into::into));
+        // Idempotent "fuse", scoped to the send half only: once the send half has been shut down,
+        // repeated `poll_close` calls replay the cached result instead of re-driving the shutdown.
+        // This does not affect reads (see `poll_read`).
+        if let Some(send_close) = self.send_close {
+            return Poll::Ready(send_close.map_err(Into::into));
         }
-        let close_result = futures::ready!(AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx));
-        self.close_result = Some(close_result.as_ref().map_err(|e| e.kind()).copied());
-        Poll::Ready(close_result)
+        let res = futures::ready!(AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx));
+        self.send_close = Some(res.as_ref().map_err(|e| e.kind()).copied());
+        Poll::Ready(res)
     }
 }

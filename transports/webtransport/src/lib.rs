@@ -58,7 +58,11 @@ pub use self::{
 };
 
 /// Errors that may happen on the [`Transport`] or a single [`Connection`].
+///
+/// This enum is `#[non_exhaustive]`: the crate is unreleased and may add further variants without
+/// a breaking change, so downstream `match`es must include a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Error after the remote has been reached.
     #[error(transparent)]
