@@ -176,6 +176,10 @@ impl Keypair {
     /// Sign a message using the private key of this keypair, producing
     /// a signature that can be verified using the corresponding public key.
     #[allow(unused_variables)]
+    // With only a single key type feature enabled, every match arm returns `Ok(..)`, so clippy
+    // flags this as `unnecessary_wraps`. The `Result` is required once a fallible key type (e.g.
+    // RSA) is compiled in, so this is a feature-gated false positive.
+    #[allow(clippy::unnecessary_wraps)]
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SigningError> {
         match self.keypair {
             #[cfg(feature = "ed25519")]
@@ -212,6 +216,9 @@ impl Keypair {
     }
 
     /// Encode a private key as protobuf structure.
+    // Feature-gated false positive: with a single key type feature the only reachable arm returns
+    // `Ok(..)`, so clippy reports `unnecessary_wraps`; other key types make the `Result` necessary.
+    #[allow(clippy::unnecessary_wraps)]
     pub fn to_protobuf_encoding(&self) -> Result<Vec<u8>, DecodingError> {
         #[cfg(any(
             feature = "ecdsa",
@@ -380,6 +387,9 @@ impl Keypair {
 
     /// Return the secret key of the [`Keypair`].
     #[allow(dead_code)]
+    // Feature-gated false positive: with a single key type feature the only reachable arm returns
+    // `Some(..)`, so clippy reports `unnecessary_wraps`; RSA (when enabled) returns `None`.
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn secret(&self) -> Option<[u8; 32]> {
         match self.keypair {
             #[cfg(feature = "ed25519")]
