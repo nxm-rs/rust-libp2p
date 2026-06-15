@@ -353,7 +353,7 @@ impl Certificate {
 
     /// Reads a single length-prefixed field, bounding the declared length against `MAX_FIELD_LEN`
     /// *before* allocating. The length is read as a big-endian `u64` (matching
-    /// [`Self::write_data`]) and is therefore always non-negative; `usize::try_from` plus the
+    /// [`Self::push_data`]) and is therefore always non-negative; `usize::try_from` plus the
     /// cap make the on-wire length effectively bounded, so no attacker-controlled prefix can
     /// drive a large allocation.
     fn read_data<R: Read>(r: &mut R) -> Result<Vec<u8>, Error> {
