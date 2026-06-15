@@ -16,6 +16,26 @@
 //! the first bidirectional stream (without `multistream-select`). The certificate hashes are
 //! bound to the authenticated peer via the Noise `webtransport_certhashes` extension.
 //!
+//! ## Certificate rotation
+//!
+//! Because the self-signed certificate is short-lived (under 14 days, the browser ceiling for
+//! hash-pinned certificates), a listener cannot serve a single fixed certificate forever: once it
+//! expires the advertised `/certhash` stops matching any servable certificate and the listener goes
+//! dead. Instead a listener manages an **ordered set of certificates** and rotates automatically.
+//!
+//! Following the spec and go-libp2p, certificates use **sequential validity windows with a one-hour
+//! clock-skew backdate on each edge** (served validity `= certValidity - 2h`, keeping the total
+//! window under 14 days). A listener advertises **two** certificate hashes in its multiaddr (the
+//! current and next certificates) and reports **up to three** over Noise (additionally a
+//! recently-expired one, which the spec recommends so in-flight dialers still verify). Before the
+//! active certificate expires the listener generates a successor, hot-swaps the endpoint TLS config
+//! *without dropping live connections*, and re-publishes its listen address (an
+//! [`AddressExpired`](libp2p_core::transport::TransportEvent::AddressExpired) followed by a
+//! [`NewAddress`](libp2p_core::transport::TransportEvent::NewAddress)).
+//!
+//! Use [`Config::generate`] to start from a current+next pair; [`Config::new`] (single certificate)
+//! still self-rotates.
+//!
 //! [WebTransport]: https://www.w3.org/TR/webtransport/
 //! [`wtransport`]: https://docs.rs/wtransport
 //! [`libp2p-webtransport-websys`]: https://docs.rs/libp2p-webtransport-websys
@@ -32,7 +52,7 @@ use wtransport::error::ConnectionError;
 
 pub use self::{
     certificate::{CertHash, Certificate},
-    config::Config,
+    config::{Config, ConfigError},
     connection::{Connection, Stream},
     transport::Transport,
 };
@@ -77,6 +97,10 @@ pub enum Error {
     /// supported).
     #[error("Unsupported certificate hash; only SHA-256 multihashes are supported")]
     UnsupportedCerthash,
+
+    /// Invalid certificate configuration (e.g. an empty certificate set).
+    #[error(transparent)]
+    Config(#[from] ConfigError),
 }
 
 impl From<Error> for TransportError<Error> {

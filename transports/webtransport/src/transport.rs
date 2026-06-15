@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     pin::Pin,
@@ -18,6 +18,7 @@ use libp2p_core::{
 };
 use libp2p_identity::{Keypair, PeerId};
 use socket2::{Domain, Socket, Type};
+use time::OffsetDateTime;
 use wtransport::{
     ClientConfig, ServerConfig,
     endpoint::{ConnectOptions, Endpoint, SessionRequest, endpoint_side::Server},
@@ -27,10 +28,22 @@ use wtransport::{
 
 use crate::{
     Connecting, Error,
-    certificate::{CertHash, MULTIHASH_SHA256_CODE},
-    config::Config,
+    certificate::{
+        CERT_VALID_PERIOD, CLOCK_SKEW_ALLOWANCE, CertHash, Certificate, MULTIHASH_SHA256_CODE,
+    },
+    config::{Config, QuicParams, alpn_protocols},
     connection::{Connection, WEBTRANSPORT_PATH},
 };
+
+/// How long before the active certificate's `not_after` the listener generates and rotates to a
+/// successor. Chosen well above the clock-skew allowance so rotation always completes while the
+/// outgoing certificate is still servable to in-flight dialers.
+const ROTATE_BEFORE_EXPIRY: time::Duration = CLOCK_SKEW_ALLOWANCE;
+
+/// Bounded backoff after a certificate-*generation* failure, so a persistent failure cannot busy-
+/// loop the listener or emit `ListenerError` faster than this interval. Rotation never closes the
+/// listener on a transient failure.
+const GENERATION_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
 pub struct Transport {
     config: Config,
@@ -69,14 +82,21 @@ impl libp2p_core::Transport for Transport {
         let quic_transport_config = self.config.get_quic_transport_config();
 
         let config = ServerConfig::builder()
-            .with_bind_socket(socket.try_clone().unwrap())
+            .with_bind_socket(
+                socket
+                    .try_clone()
+                    .map_err(|e| TransportError::Other(e.into()))?,
+            )
             .with_custom_tls_and_transport(server_tls_config, quic_transport_config)
             .build();
 
         let endpoint =
             wtransport::Endpoint::server(config).map_err(|e| TransportError::Other(e.into()))?;
         let keypair = &self.config.keypair;
-        let cert_hashes = self.config.cert_hashes();
+        // The listener owns its own copy of the certificate set and QUIC config so it can rebuild
+        // the endpoint TLS config during rotation without holding the (non-`Clone`) `Config`.
+        let certs = self.config.certs().to_vec();
+        let quic_params = self.config.quic_params();
         let handshake_timeout = self.config.handshake_timeout;
 
         tracing::debug!("Listening on {:?}, listenerId {}", &socket, &id);
@@ -86,7 +106,8 @@ impl libp2p_core::Transport for Transport {
             socket,
             endpoint,
             keypair,
-            cert_hashes,
+            certs,
+            quic_params,
             handshake_timeout,
         )?;
         self.listeners.push(listener);
@@ -163,6 +184,10 @@ struct Listener {
     listener_id: ListenerId,
     /// Endpoint
     endpoint: Arc<Endpoint<Server>>,
+    /// The bound UDP socket, retained so rotation can rebuild a full [`ServerConfig`] (via
+    /// `try_clone`) for [`Endpoint::reload_config`] without rebinding or dropping live
+    /// connections.
+    socket: UdpSocket,
     /// Watcher for network interface changes.
     /// None if we are only listening on a single interface.
     if_watcher: Option<IfWatcher>,
@@ -172,55 +197,87 @@ struct Listener {
     handshake_timeout: Duration,
     /// Whether the listener was closed and the stream should terminate.
     is_closed: bool,
-    /// Pending event to reported.
-    pending_event: Option<<Self as Stream>::Item>,
+    /// Pending events to report, drained front-first. Rotation enqueues an `AddressExpired`
+    /// followed by a `NewAddress`; `close()` enqueues the final `ListenerClosed` last.
+    pending_events: VecDeque<<Self as Stream>::Item>,
     /// The stream must be to awaken after it has been closed to deliver the last event.
     close_listener_waker: Option<Waker>,
 
     keypair: Keypair,
 
+    /// The live certificate set (current [+ next]), sorted by `not_before` ascending; `certs[0]`
+    /// is the active/served certificate. Expired certificates are removed promptly (their key
+    /// material is zeroized on drop); the most recently expired hash is retained only in
+    /// `last_hash` for the Noise set.
+    certs: Vec<Certificate>,
+    /// The most recently expired certificate hash, advertised only over Noise (per the spec
+    /// SHOULD) and never in the multiaddr.
+    last_hash: Option<CertHash>,
+    /// Cached advertised hash set, ordered `[last?, current, next]`. The multiaddr uses only the
+    /// last two entries (current + next); the Noise set uses all of them. Recomputed on rotation.
     cert_hashes: Vec<CertHash>,
+    /// QUIC transport parameters, retained to rebuild the full `ServerConfig` on rotation.
+    quic_params: QuicParams,
+    /// Fires when the active certificate should be rotated. Actively polled every `poll_next` pass
+    /// so an idle listener still wakes to rotate.
+    rotation_timer: futures_timer::Delay,
+    /// Clock used by rotation. Production reads [`OffsetDateTime::now_utc`]; tests inject a clock
+    /// so rotation can be exercised in bounded (sub-second) time.
+    now_fn: Box<dyn Fn() -> OffsetDateTime + Send>,
 }
 
 impl Listener {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         listener_id: ListenerId,
         socket: UdpSocket,
         endpoint: Endpoint<Server>,
         keypair: &Keypair,
-        cert_hashes: Vec<CertHash>,
+        certs: Vec<Certificate>,
+        quic_params: QuicParams,
         handshake_timeout: Duration,
     ) -> Result<Self, Error> {
         let endpoint = Arc::new(endpoint);
         let c_endpoint = Arc::clone(&endpoint);
         let accept = Self::accept(c_endpoint, listener_id).boxed();
 
+        // Initial advertised set: no expired generation yet, so just the live certs.
+        let cert_hashes: Vec<CertHash> = certs.iter().map(|c| c.cert_hash()).collect();
+
+        let mut pending_events = VecDeque::new();
         let if_watcher;
-        let pending_event;
         let local_addr = socket.local_addr()?;
         if local_addr.ip().is_unspecified() {
             if_watcher = Some(IfWatcher::new()?);
-            pending_event = None;
         } else {
             if_watcher = None;
             let ma = socketaddr_to_multiaddr_with_hashes(&local_addr, &cert_hashes);
-            pending_event = Some(TransportEvent::NewAddress {
+            pending_events.push_back(TransportEvent::NewAddress {
                 listener_id,
                 listen_addr: ma,
-            })
+            });
         }
+
+        let rotation_timer =
+            futures_timer::Delay::new(rotation_delay(&certs, OffsetDateTime::now_utc()));
 
         Ok(Listener {
             listener_id,
             endpoint,
+            socket,
             if_watcher,
             accept,
             handshake_timeout,
             is_closed: false,
-            pending_event,
+            pending_events,
             close_listener_waker: None,
             keypair: keypair.clone(),
+            certs,
+            last_hash: None,
             cert_hashes,
+            quic_params,
+            rotation_timer,
+            now_fn: Box::new(OffsetDateTime::now_utc),
         })
     }
 
@@ -245,11 +302,14 @@ impl Listener {
             return;
         }
         self.endpoint.close(From::from(0u32), &[]);
-        self.pending_event = Some(TransportEvent::ListenerClosed {
-            listener_id: self.listener_id,
-            reason,
-        });
+        // Stop rotation: do not enqueue further address events, and ensure `ListenerClosed` is the
+        // last event delivered. Any address events already queued ahead of it still drain first.
         self.is_closed = true;
+        self.pending_events
+            .push_back(TransportEvent::ListenerClosed {
+                listener_id: self.listener_id,
+                reason,
+            });
 
         // Wake the stream to deliver the last event.
         if let Some(waker) = self.close_listener_waker.take() {
@@ -268,6 +328,194 @@ impl Listener {
         let set = self.cert_hashes.iter().cloned().collect::<HashSet<_>>();
 
         res.with_webtransport_certhashes(set)
+    }
+
+    #[cfg(test)]
+    fn active_cert_hash(&self) -> CertHash {
+        self.certs[0].cert_hash()
+    }
+
+    /// The set of hashes advertised in the multiaddr (the last two of `cert_hashes`).
+    #[cfg(test)]
+    fn multiaddr_hash_set(&self) -> HashSet<CertHash> {
+        self.cert_hashes.iter().rev().take(2).copied().collect()
+    }
+
+    /// The set of hashes advertised over Noise (all of `cert_hashes`).
+    #[cfg(test)]
+    fn noise_hash_set(&self) -> HashSet<CertHash> {
+        self.cert_hashes.iter().copied().collect()
+    }
+
+    /// The multiaddrs for the current bind, one per applicable interface.
+    ///
+    /// For a specified bind that is just the single bound address; for an unspecified bind it is
+    /// one address per matching-family interface known to the `IfWatcher`. Uses the current
+    /// advertised `cert_hashes` (so the multiaddr carries the live current+next certificate
+    /// hashes).
+    fn listen_addresses(&self) -> Vec<Multiaddr> {
+        let endpoint_addr = self.socket_addr();
+        match &self.if_watcher {
+            None => vec![socketaddr_to_multiaddr_with_hashes(
+                &endpoint_addr,
+                &self.cert_hashes,
+            )],
+            Some(if_watcher) => if_watcher
+                .iter()
+                .filter_map(|inet| {
+                    ip_to_listen_addr(&endpoint_addr, inet.addr(), &self.cert_hashes)
+                })
+                .collect(),
+        }
+    }
+
+    /// Drive certificate rotation. Polls the rotation timer (registering its waker so an idle
+    /// listener still wakes), and when it fires either rotates to a fresh certificate set or, on a
+    /// generation failure, emits a `ListenerError` and re-arms with a bounded backoff. Never closes
+    /// the listener and never empties / serves an expired certificate.
+    fn poll_rotation(&mut self, cx: &mut Context<'_>) {
+        // A closed listener does not rotate.
+        if self.is_closed {
+            return;
+        }
+
+        // Register the timer waker every pass; only act when it actually fires.
+        if Pin::new(&mut self.rotation_timer).poll(cx).is_pending() {
+            return;
+        }
+
+        let now = (self.now_fn)();
+        match self.rotate(now) {
+            Ok(()) => {
+                // Re-arm to the next deadline derived solely from the local clock + cert validity.
+                self.rotation_timer = futures_timer::Delay::new(rotation_delay(&self.certs, now));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    listener = %self.listener_id,
+                    %error,
+                    "WebTransport certificate generation failed; retaining current set, backing off"
+                );
+                // Retain the current set and re-arm with a bounded backoff (no busy loop, listener
+                // stays open).
+                self.pending_events
+                    .push_back(TransportEvent::ListenerError {
+                        listener_id: self.listener_id,
+                        error,
+                    });
+                self.rotation_timer = futures_timer::Delay::new(GENERATION_FAILURE_BACKOFF);
+            }
+        }
+    }
+
+    /// Perform one rotation tick at `now`.
+    ///
+    /// Partitions expired certificates out of the live set (keeping the most recent one's hash in
+    /// the Noise-only `last_hash`), generates a successor when the set lacks a current+next pair or
+    /// the active certificate nears expiry, rebuilds and hot-swaps the endpoint TLS config, then
+    /// recomputes `cert_hashes` and enqueues `AddressExpired`/`NewAddress` if the advertised set
+    /// changed. On certificate-generation failure the set is left untouched and the error is
+    /// returned. Invariants: `certs` is never emptied and `certs[0]` is always currently valid.
+    fn rotate(&mut self, now: OffsetDateTime) -> Result<(), Error> {
+        let old_hashes = self.cert_hashes.clone();
+        let old_addrs = self.listen_addresses();
+
+        // 1. Partition expired certificates out of the live set, but never drop the last one. Keep
+        //    the most-recently-expired hash for the Noise set.
+        if self.certs.len() > 1 {
+            // Certs are sorted ascending by not_before; expiry order matches.
+            while self.certs.len() > 1 && self.certs[0].not_after() <= now {
+                let expired = self.certs.remove(0);
+                self.last_hash = Some(expired.cert_hash());
+                // `expired` (and its zeroizing key) is dropped here.
+            }
+        }
+
+        // 2. Ensure we have a successor: generate one when there is no `next` cert, or the active
+        //    cert is within the rotate threshold of expiry. Generation is the only fallible path.
+        let need_next = self.certs.len() < 2;
+        let active_near_expiry = self.certs[0].not_after() - ROTATE_BEFORE_EXPIRY <= now;
+        if need_next || active_near_expiry {
+            // Anchor the new cert sequentially after the latest existing one (with skew overlap),
+            // but never before `now - CLOCK_SKEW_ALLOWANCE` (so a far-forward clock jump still
+            // produces a currently-valid certificate rather than an already-expired one).
+            let latest_not_after = self
+                .certs
+                .iter()
+                .map(|c| c.not_after())
+                .max()
+                .expect("certs is non-empty");
+            let anchored = latest_not_after - 2i32 * CLOCK_SKEW_ALLOWANCE;
+            let floor = now - CLOCK_SKEW_ALLOWANCE;
+            let next_not_before = anchored.max(floor);
+            let next = Certificate::generate_with_validity(next_not_before, CERT_VALID_PERIOD)
+                .map_err(|e| {
+                    Error::Io(io::Error::other(format!("certificate generation: {e:?}")))
+                })?;
+            self.certs.push(next);
+            self.certs.sort_by_key(|c| c.not_before());
+        }
+
+        // 3. If, after a forward clock jump, certs[0] is itself expired, drop it now that a fresh
+        //    successor exists. Never leave the set empty.
+        while self.certs.len() > 1 && self.certs[0].not_after() <= now {
+            let expired = self.certs.remove(0);
+            self.last_hash = Some(expired.cert_hash());
+        }
+
+        // 4. Recompute the advertised hash set ordered `[last?, current, next]`.
+        let mut new_hashes = Vec::with_capacity(self.certs.len() + 1);
+        if let Some(last) = self.last_hash {
+            // Only keep the expired hash in the Noise set while it is genuinely "recent"; once it
+            // is no longer among the live certs it is harmless, but drop it if it duplicates a live
+            // hash (it never should).
+            if !self.certs.iter().any(|c| c.cert_hash() == last) {
+                new_hashes.push(last);
+            } else {
+                self.last_hash = None;
+            }
+        }
+        new_hashes.extend(self.certs.iter().map(|c| c.cert_hash()));
+
+        // Nothing changed (e.g. timer fired early): no swap, no events.
+        if new_hashes == old_hashes {
+            return Ok(());
+        }
+
+        // 5. Atomic swap, in order: rebuild full ServerConfig -> reload_config(.., false) -> update
+        //    cert_hashes -> emit AddressExpired then NewAddress. Update `cert_hashes` together with
+        //    the reload so no inbound handshake completes for a cert whose hash is absent from the
+        //    Noise set. With rebind=false the reload only swaps the TLS/QUIC config and leaves the
+        //    socket and live connections intact.
+        let tls = libp2p_tls::make_webtransport_server_config(
+            self.certs[0].get_certificate_der(),
+            &self.certs[0].get_private_key_der(),
+            alpn_protocols(),
+        );
+        let server_config = ServerConfig::builder()
+            .with_bind_socket(self.socket.try_clone()?)
+            .with_custom_tls_and_transport(tls, self.quic_params.build())
+            .build();
+
+        self.endpoint.reload_config(server_config, false)?;
+        self.cert_hashes = new_hashes;
+
+        // 6. Re-advertise: AddressExpired(old) then NewAddress(new), per interface.
+        for addr in old_addrs {
+            self.pending_events
+                .push_back(TransportEvent::AddressExpired {
+                    listener_id: self.listener_id,
+                    listen_addr: addr,
+                });
+        }
+        for addr in self.listen_addresses() {
+            self.pending_events.push_back(TransportEvent::NewAddress {
+                listener_id: self.listener_id,
+                listen_addr: addr,
+            });
+        }
+
+        Ok(())
     }
 
     fn poll_if_addr(&mut self, cx: &mut Context<'_>) -> Poll<<Self as Stream>::Item> {
@@ -321,7 +569,11 @@ impl Stream for Listener {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if let Some(event) = self.pending_event.take() {
+            // Drive certificate rotation first so its waker is registered and any address events it
+            // enqueues are picked up by the drain below.
+            self.poll_rotation(cx);
+
+            if let Some(event) = self.pending_events.pop_front() {
                 return Poll::Ready(Some(event));
             }
             if self.is_closed {
@@ -387,8 +639,24 @@ impl fmt::Debug for Listener {
             .field("listener_id", &self.listener_id)
             .field("handshake_timeout", &self.handshake_timeout)
             .field("is_closed", &self.is_closed)
-            .field("pending_event", &self.pending_event)
+            .field("pending_events", &self.pending_events)
+            .field("cert_hashes", &self.cert_hashes)
             .finish()
+    }
+}
+
+/// Compute how long to wait before the next rotation tick, given the live certificate set and the
+/// current time. The deadline is `active.not_after - ROTATE_BEFORE_EXPIRY`, clamped to zero (so an
+/// already-due rotation fires immediately on the next poll). Derived solely from the local clock
+/// and certificate validity — never from peer input.
+fn rotation_delay(certs: &[Certificate], now: OffsetDateTime) -> Duration {
+    let active = &certs[0];
+    let deadline = active.not_after() - ROTATE_BEFORE_EXPIRY;
+    let remaining = deadline - now;
+    if remaining.is_positive() {
+        remaining.try_into().unwrap_or(Duration::ZERO)
+    } else {
+        Duration::ZERO
     }
 }
 
@@ -461,6 +729,14 @@ fn socketaddr_to_multiaddr(socket_addr: &SocketAddr) -> Multiaddr {
         .with(Protocol::WebTransport)
 }
 
+/// Build a WebTransport listen multiaddr carrying up to the **last two** certificate hashes of
+/// `hashes`.
+///
+/// This implements the multiaddr side of the Noise(3)/multiaddr(2) split: `cert_hashes` is ordered
+/// `[last?, current, next]`, so taking the last two emits exactly the live current+next hashes and
+/// deliberately omits any recently-expired (`last`) hash, which lives only in the Noise set. The
+/// order of the two emitted `/certhash` components is not load-bearing — dialers pin both and the
+/// Noise verification is an order-insensitive subset check.
 fn socketaddr_to_multiaddr_with_hashes(socket_addr: &SocketAddr, hashes: &[CertHash]) -> Multiaddr {
     let mut res = socketaddr_to_multiaddr(socket_addr);
 
@@ -663,11 +939,17 @@ fn multiaddr_to_dial_addr(addr: &Multiaddr) -> Option<(SocketAddr, Vec<CertHash>
 
 #[cfg(test)]
 mod test {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        sync::{
+            Arc as StdArc,
+            atomic::{AtomicI64, Ordering},
+        },
+    };
 
     use futures::future::poll_fn;
     use libp2p_core::Transport as CoreTransport;
-    use time::{OffsetDateTime, ext::NumericalDuration};
+    use time::{Duration as TimeDuration, OffsetDateTime, ext::NumericalDuration};
 
     use super::*;
     use crate::certificate::Certificate;
@@ -679,6 +961,78 @@ mod test {
 
         (keypair, cert)
     }
+
+    /// A per-test clock the rotation engine reads via the `now_fn` seam. Each listener gets its own
+    /// handle, so concurrently-running tests never contend on a shared clock.
+    #[derive(Clone)]
+    struct TestClock(StdArc<AtomicI64>);
+
+    impl TestClock {
+        fn new(t: OffsetDateTime) -> Self {
+            Self(StdArc::new(AtomicI64::new(t.unix_timestamp_nanos() as i64)))
+        }
+        fn set(&self, t: OffsetDateTime) {
+            self.0
+                .store(t.unix_timestamp_nanos() as i64, Ordering::SeqCst);
+        }
+        fn now_fn(&self) -> Box<dyn Fn() -> OffsetDateTime + Send> {
+            let inner = self.0.clone();
+            Box::new(move || {
+                OffsetDateTime::from_unix_timestamp_nanos(inner.load(Ordering::SeqCst) as i128)
+                    .unwrap()
+            })
+        }
+    }
+
+    /// Build a `Listener` bound to an ephemeral loopback port with the given certificate set and a
+    /// fresh injected clock set to `now`. Returns the listener and its clock handle.
+    fn build_listener_with_clock(
+        certs: Vec<Certificate>,
+        now: OffsetDateTime,
+    ) -> (Listener, TestClock) {
+        let clock = TestClock::new(now);
+        let keypair = Keypair::generate_ed25519();
+        let socket_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let socket = create_socket(socket_addr).unwrap();
+
+        let tls = libp2p_tls::make_webtransport_server_config(
+            certs[0].get_certificate_der(),
+            &certs[0].get_private_key_der(),
+            alpn_protocols(),
+        );
+        let quic_params = Config::new(&keypair, certs[0].clone()).quic_params();
+        let server_config = ServerConfig::builder()
+            .with_bind_socket(socket.try_clone().unwrap())
+            .with_custom_tls_and_transport(tls, quic_params.build())
+            .build();
+        let endpoint = wtransport::Endpoint::server(server_config).unwrap();
+
+        let mut listener = Listener::new(
+            ListenerId::next(),
+            socket,
+            endpoint,
+            &keypair,
+            certs,
+            quic_params,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        listener.now_fn = clock.now_fn();
+        // Drain the initial NewAddress so tests observe only rotation-induced events.
+        let _ = listener.pending_events.pop_front();
+        (listener, clock)
+    }
+
+    /// Convenience for tests that drive `rotate(now)` directly and do not advance the clock through
+    /// `poll_next` (so the clock handle is unused).
+    fn build_listener(certs: Vec<Certificate>, now: OffsetDateTime) -> Listener {
+        build_listener_with_clock(certs, now).0
+    }
+
+    // A short served validity for tests. Must exceed `2 * CLOCK_SKEW_ALLOWANCE` so the
+    // sequential-windows-with-skew model is well-formed, and exceed `ROTATE_BEFORE_EXPIRY` so the
+    // initial active cert is not already "due".
+    const TEST_VALIDITY: TimeDuration = TimeDuration::hours(4);
 
     #[tokio::test]
     async fn test_close_listener() {
@@ -825,5 +1179,302 @@ mod test {
                 None
             ))
         );
+    }
+
+    // ---- Certificate rotation engine (R-series) ----
+
+    /// Build an initial current+next set with short windows anchored at `now`, mirroring
+    /// `Config::generate` but with `TEST_VALIDITY` so the active cert is genuinely near expiry.
+    fn short_current_next(now: OffsetDateTime) -> Vec<Certificate> {
+        let current_nb = now - CLOCK_SKEW_ALLOWANCE;
+        let current = Certificate::generate_with_validity(current_nb, TEST_VALIDITY).unwrap();
+        let next_nb = current.not_after() - 2i32 * CLOCK_SKEW_ALLOWANCE;
+        let next = Certificate::generate_with_validity(next_nb, TEST_VALIDITY).unwrap();
+        let mut v = vec![current, next];
+        v.sort_by_key(|c| c.not_before());
+        v
+    }
+
+    fn multiaddr_hashes(ma: &Multiaddr) -> Vec<CertHash> {
+        ma.iter()
+            .filter_map(|p| match p {
+                Protocol::Certhash(h) => Some(h),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // R1: the initial NewAddress carries exactly two certhashes for a generated set.
+    #[tokio::test]
+    async fn initial_address_has_two_certhashes() {
+        let now = OffsetDateTime::now_utc();
+        let certs = short_current_next(now);
+        let keypair = Keypair::generate_ed25519();
+        let mut transport = Transport::new(Config::new_with_certs(&keypair, certs).unwrap());
+        transport
+            .listen_on(
+                ListenerId::next(),
+                "/ip4/127.0.0.1/udp/0/quic-v1/webtransport".parse().unwrap(),
+            )
+            .unwrap();
+        match poll_fn(|cx| Pin::new(&mut transport).as_mut().poll(cx)).await {
+            TransportEvent::NewAddress { listen_addr, .. } => {
+                assert_eq!(multiaddr_hashes(&listen_addr).len(), 2);
+            }
+            e => panic!("unexpected event: {e:?}"),
+        }
+    }
+
+    // R2/R3/R7: a rotation past the active cert's window promotes `next`, mints a fresh successor,
+    // keeps the just-expired hash only in the Noise set, and serves the new active cert.
+    #[tokio::test]
+    async fn rotate_promotes_next_and_mints_successor() {
+        let now = OffsetDateTime::now_utc();
+        let certs = short_current_next(now);
+        let old_current_hash = certs[0].cert_hash();
+        let old_next_hash = certs[1].cert_hash();
+        let mut listener = build_listener(certs, now);
+
+        // Advance past the original current cert's expiry (still within next's window).
+        let later = now + TEST_VALIDITY + TimeDuration::seconds(1);
+        listener.rotate(later).expect("rotation succeeds");
+
+        // Active is now the old `next`; multiaddr advertises current+next (2 hashes), neither is
+        // the expired old current.
+        assert_eq!(listener.active_cert_hash(), old_next_hash);
+        let live: Vec<_> = listener.certs.iter().map(|c| c.cert_hash()).collect();
+        assert!(live.contains(&old_next_hash));
+        assert!(!live.contains(&old_current_hash));
+        // A fresh successor appeared.
+        assert_eq!(listener.certs.len(), 2);
+
+        // Noise set ⊇ multiaddr set, and the recently-expired hash lives only in the Noise set.
+        let multiaddr_set = listener.multiaddr_hash_set();
+        let noise_set = listener.noise_hash_set();
+        assert!(multiaddr_set.is_subset(&noise_set));
+        assert!(noise_set.contains(&old_current_hash));
+        assert!(!multiaddr_set.contains(&old_current_hash));
+        assert_eq!(multiaddr_set.len(), 2);
+        assert!(noise_set.len() >= 3);
+    }
+
+    // R4: post-rotation Noise set is exactly last+current+next and is a superset of the 2-hash
+    // multiaddr set (membership, not positional order).
+    #[tokio::test]
+    async fn noise_set_superset_of_multiaddr_set() {
+        let now = OffsetDateTime::now_utc();
+        let certs = short_current_next(now);
+        let mut listener = build_listener(certs, now);
+        listener
+            .rotate(now + TEST_VALIDITY + TimeDuration::seconds(1))
+            .unwrap();
+
+        let multiaddr_set = listener.multiaddr_hash_set();
+        let noise_set = listener.noise_hash_set();
+        assert_eq!(multiaddr_set.len(), 2);
+        assert_eq!(noise_set.len(), 3);
+        assert!(multiaddr_set.is_subset(&noise_set));
+    }
+
+    // R6: no rotation events / no swap before the active cert nears expiry.
+    #[tokio::test]
+    async fn no_rotation_when_not_due() {
+        let now = OffsetDateTime::now_utc();
+        // Full-length current+next set, so the active cert is far from its rotate threshold.
+        let keypair = Keypair::generate_ed25519();
+        let config = Config::generate(&keypair, now).unwrap();
+        let certs = config.certs().to_vec();
+        let mut listener = build_listener(certs, now);
+        let before = listener.cert_hashes.clone();
+
+        // The timer is armed well in the future.
+        let delay = rotation_delay(&listener.certs, now);
+        assert!(
+            delay > Duration::from_secs(60 * 60 * 24),
+            "rotation not imminent"
+        );
+
+        // Calling rotate at `now` must be a no-op: nothing expired, active not near expiry.
+        listener.rotate(now).unwrap();
+        assert_eq!(listener.cert_hashes, before, "no swap, no event");
+        assert!(listener.pending_events.is_empty());
+    }
+
+    // R5/R13: rotating when *all* certs are expired regenerates rather than emptying, and never
+    // panics on `certs[0]`. The active cert post-rotation is currently valid.
+    #[tokio::test]
+    async fn rotate_all_expired_regenerates_never_empty() {
+        let now = OffsetDateTime::now_utc();
+        let certs = short_current_next(now);
+        let mut listener = build_listener(certs, now);
+
+        // Jump far past every window.
+        let far = now + TimeDuration::days(60);
+        listener.rotate(far).expect("regeneration succeeds");
+
+        assert!(!listener.certs.is_empty(), "set must never be empty");
+        let active = &listener.certs[0];
+        assert!(
+            active.not_before() <= far && far < active.not_after(),
+            "active cert must be currently valid after a far-forward jump"
+        );
+    }
+
+    // R2 (event ordering via the stream): when rotation fires it emits AddressExpired then
+    // NewAddress with the same listener id.
+    #[tokio::test]
+    async fn rotation_emits_address_expired_then_new_address() {
+        let now = OffsetDateTime::now_utc();
+        let certs = short_current_next(now);
+        let (mut listener, clock) = build_listener_with_clock(certs, now);
+        let id = listener.listener_id;
+
+        // Arm the timer to fire immediately and advance the clock past the active window.
+        listener.rotation_timer = futures_timer::Delay::new(Duration::ZERO);
+        clock.set(now + TEST_VALIDITY + TimeDuration::seconds(1));
+
+        let ev1 = poll_fn(|cx| Pin::new(&mut listener).poll_next(cx)).await;
+        let ev2 = poll_fn(|cx| Pin::new(&mut listener).poll_next(cx)).await;
+
+        match (ev1, ev2) {
+            (
+                Some(TransportEvent::AddressExpired { listener_id: a, .. }),
+                Some(TransportEvent::NewAddress {
+                    listener_id: b,
+                    listen_addr,
+                }),
+            ) => {
+                assert_eq!(a, id);
+                assert_eq!(b, id);
+                assert_eq!(multiaddr_hashes(&listen_addr).len(), 2);
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    // R8: queued address events drain before ListenerClosed, and none are dropped.
+    #[tokio::test]
+    async fn close_delivers_listener_closed_last() {
+        let now = OffsetDateTime::now_utc();
+        let certs = short_current_next(now);
+        let mut listener = build_listener(certs, now);
+        let id = listener.listener_id;
+
+        // Rotate to enqueue AddressExpired + NewAddress, then close (enqueues ListenerClosed).
+        listener
+            .rotate(now + TEST_VALIDITY + TimeDuration::seconds(1))
+            .unwrap();
+        listener.close(Ok(()));
+
+        let e1 = poll_fn(|cx| Pin::new(&mut listener).poll_next(cx)).await;
+        let e2 = poll_fn(|cx| Pin::new(&mut listener).poll_next(cx)).await;
+        let e3 = poll_fn(|cx| Pin::new(&mut listener).poll_next(cx)).await;
+        let e4 = poll_fn(|cx| Pin::new(&mut listener).poll_next(cx)).await;
+
+        assert!(matches!(e1, Some(TransportEvent::AddressExpired { .. })));
+        assert!(matches!(e2, Some(TransportEvent::NewAddress { .. })));
+        assert!(matches!(
+            e3,
+            Some(TransportEvent::ListenerClosed { listener_id, reason: Ok(()) }) if listener_id == id
+        ));
+        assert!(e4.is_none(), "stream terminates after ListenerClosed");
+    }
+
+    // R10: the multiaddr helper emits exactly two /certhash even when handed a 3-element slice
+    // (asserting the multiaddr/Noise split, not a global cap).
+    #[test]
+    fn multiaddr_emits_two_of_three_hashes() {
+        let now = OffsetDateTime::now_utc();
+        let a = Certificate::generate(now).unwrap();
+        let b = Certificate::generate(now).unwrap();
+        let c = Certificate::generate(now).unwrap();
+        // Order is [last, current, next]; multiaddr should take the last two (current+next).
+        let hashes = vec![a.cert_hash(), b.cert_hash(), c.cert_hash()];
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4433);
+        let ma = socketaddr_to_multiaddr_with_hashes(&addr, &hashes);
+        let emitted = multiaddr_hashes(&ma);
+        assert_eq!(emitted.len(), 2);
+        // The expired `last` (a) is excluded; current+next (b, c) are present.
+        assert!(!emitted.contains(&a.cert_hash()));
+        assert!(emitted.contains(&b.cert_hash()));
+        assert!(emitted.contains(&c.cert_hash()));
+    }
+
+    // ---- Negative / malformed dial-address parsing (N-series) ----
+
+    /// Build a WebTransport dial multiaddr with `n` distinct certhashes.
+    fn dial_addr_with_n_certhashes(n: usize) -> Multiaddr {
+        let now = OffsetDateTime::now_utc();
+        let mut ma: Multiaddr = "/ip4/127.0.0.1/udp/4433/quic-v1/webtransport"
+            .parse()
+            .unwrap();
+        for _ in 0..n {
+            ma.push(Protocol::Certhash(
+                Certificate::generate(now).unwrap().cert_hash(),
+            ));
+        }
+        ma
+    }
+
+    // N1: a two-certhash dial addr parses both hashes.
+    #[test]
+    fn dial_two_certhashes() {
+        let (_, hashes, _) =
+            multiaddr_to_dial_addr(&dial_addr_with_n_certhashes(2)).expect("parses");
+        assert_eq!(hashes.len(), 2);
+    }
+
+    // N2: a three-certhash dial addr collects all three (unbounded dial vec).
+    #[test]
+    fn dial_three_certhashes() {
+        let (_, hashes, _) =
+            multiaddr_to_dial_addr(&dial_addr_with_n_certhashes(3)).expect("parses");
+        assert_eq!(hashes.len(), 3);
+    }
+
+    // N3: a dial address with zero certhashes parses (empty vec) — the transport rejects it later
+    // with MissingCerthashes (asserted in the dial path).
+    #[test]
+    fn dial_zero_certhashes_rejected_by_transport() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        let addr: Multiaddr = "/ip4/127.0.0.1/udp/4433/quic-v1/webtransport"
+            .parse()
+            .unwrap();
+        let res = transport.dial(
+            addr,
+            DialOpts {
+                role: libp2p_core::Endpoint::Dialer,
+                port_use: libp2p_core::transport::PortUse::Reuse,
+            },
+        );
+        assert!(
+            matches!(res, Err(TransportError::Other(Error::MissingCerthashes))),
+            "expected MissingCerthashes"
+        );
+    }
+
+    // N4: a listen address with an embedded /certhash is rejected.
+    #[test]
+    fn listen_addr_with_certhash_rejected() {
+        assert!(multiaddr_to_socketaddr(&dial_addr_with_n_certhashes(1)).is_none());
+    }
+
+    // N5/N6: a non-SHA256 / wrong-length certhash is rejected by certhash_to_digest.
+    #[test]
+    fn non_sha256_certhash_rejected() {
+        // Identity multihash (code 0x00), 4-byte digest — not SHA-256.
+        let bad = CertHash::wrap(0x00, &[1, 2, 3, 4]).unwrap();
+        assert!(matches!(
+            certhash_to_digest(&bad),
+            Err(Error::UnsupportedCerthash)
+        ));
+
+        // Wrong-length SHA-256 digest (correct code, 4 bytes instead of 32).
+        let wrong_len = CertHash::wrap(MULTIHASH_SHA256_CODE, &[1, 2, 3, 4]).unwrap();
+        assert!(matches!(
+            certhash_to_digest(&wrong_len),
+            Err(Error::UnsupportedCerthash)
+        ));
     }
 }

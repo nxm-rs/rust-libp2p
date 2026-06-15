@@ -21,12 +21,16 @@
 //! A native libp2p WebTransport echo server, mirroring the Go `echo-server` used by the
 //! `webtransport-tests` browser harness.
 //!
-//! It listens on a native WebTransport address, prints/serves its full multiaddr (including
-//! `/certhash` and `/p2p/<peer>`) over plain HTTP on `127.0.0.1:4455` (with permissive CORS so a
-//! browser can fetch it), and for every inbound connection:
+//! It listens on a native WebTransport address, prints/serves its full multiaddr (including the
+//! **two** advertised `/certhash` components and `/p2p/<peer>`) over plain HTTP on `127.0.0.1:4455`
+//! (with permissive CORS so a browser can fetch it), and for every inbound connection:
 //!  * opens one outbound stream and writes a single `1` byte (so dialers can exercise *inbound*
 //!    streams), and
 //!  * echoes every inbound stream back to the sender.
+//!
+//! The listener is built with [`Config::generate`], so it advertises a current+next certificate
+//! pair and rotates automatically before the active certificate expires (re-publishing its address
+//! when it does).
 //!
 //! Run with `cargo run -p libp2p-webtransport --example echo_server`.
 
@@ -40,8 +44,8 @@ use libp2p_core::{
     transport::{ListenerId, TransportEvent},
 };
 use libp2p_identity::Keypair;
-use libp2p_webtransport::{Certificate, Config, Transport};
-use time::{OffsetDateTime, ext::NumericalDuration};
+use libp2p_webtransport::{Config, Transport};
+use time::OffsetDateTime;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
@@ -55,10 +59,10 @@ async fn main() {
 
     let keypair = Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
-    let not_before = OffsetDateTime::now_utc().checked_sub(1.days()).unwrap();
-    let cert = Certificate::generate(not_before).expect("generate certificate");
+    let config =
+        Config::generate(&keypair, OffsetDateTime::now_utc()).expect("generate certificate set");
 
-    let mut transport = Transport::new(Config::new(&keypair, cert))
+    let mut transport = Transport::new(config)
         .map(|(peer, conn), _| (peer, StreamMuxerBox::new(conn)))
         .boxed();
 
