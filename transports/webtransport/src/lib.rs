@@ -1,3 +1,23 @@
+// Copyright 2024 Protocol Labs.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
 //! Implementation of the [WebTransport] transport for libp2p in native (non-browser)
 //! environments.
 //!
@@ -79,6 +99,15 @@
 //! # Ok::<(), libp2p_webtransport::CertificateError>(())
 //! ```
 //!
+//! # Limitations
+//!
+//! * **No DCUtR hole punching:** a coordinated hole-punch dial (`DialOpts { role:
+//!   Endpoint::Listener, port_use: PortUse::New, .. }`) fails with
+//!   [`Error::HolePunchingUnsupported`], because `wtransport`'s client endpoint cannot dial from
+//!   the listener's socket.
+//! * **`PortUse::Reuse` is not honoured:** ordinary dials always bind a fresh ephemeral socket.
+//! * **Only the `h3` ALPN is offered** by the server.
+//!
 //! [WebTransport]: https://www.w3.org/TR/webtransport/
 //! [`wtransport`]: https://docs.rs/wtransport
 //! [`libp2p-webtransport-websys`]: https://docs.rs/libp2p-webtransport-websys
@@ -159,6 +188,14 @@ pub enum Error {
     /// Invalid certificate configuration (e.g. an empty certificate set).
     #[error(transparent)]
     Config(#[from] ConfigError),
+
+    /// Coordinated hole punching (DCUtR) was requested by dialing with
+    /// `DialOpts { role: Endpoint::Listener, port_use: PortUse::New, .. }`, but this transport
+    /// cannot dial from the listener's socket: the underlying `wtransport` API only exposes
+    /// `connect` on a *client* endpoint, which always binds a fresh socket. Hole punching over
+    /// WebTransport is therefore unsupported.
+    #[error("WebTransport does not support dialing as a listener (hole punching)")]
+    HolePunchingUnsupported,
 }
 
 impl From<Error> for TransportError<Error> {

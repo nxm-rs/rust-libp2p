@@ -1,3 +1,23 @@
+// Copyright 2024 Protocol Labs.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
 use std::{
     collections::{HashSet, VecDeque},
     fmt, io,
@@ -11,9 +31,9 @@ use std::{
 use futures::{future::BoxFuture, prelude::*, ready, stream::SelectAll};
 use if_watch::{IfEvent, tokio::IfWatcher};
 use libp2p_core::{
-    Multiaddr,
+    Endpoint as CoreEndpoint, Multiaddr,
     multiaddr::Protocol,
-    transport::{DialOpts, ListenerId, TransportError, TransportEvent},
+    transport::{DialOpts, ListenerId, PortUse, TransportError, TransportEvent},
     upgrade::OutboundConnectionUpgrade,
 };
 use libp2p_identity::{Keypair, PeerId};
@@ -154,10 +174,21 @@ impl libp2p_core::Transport for Transport {
         }
     }
 
+    /// Dials a WebTransport address.
+    ///
+    /// Two behaviours are non-obvious:
+    ///
+    /// * A genuine coordinated hole-punch — `DialOpts { role: Endpoint::Listener, port_use:
+    ///   PortUse::New, .. }` — is rejected synchronously with [`Error::HolePunchingUnsupported`]:
+    ///   `wtransport` only exposes `connect` on a *client* endpoint, which always binds a fresh
+    ///   socket, so dialing from the listener's socket is impossible.
+    /// * [`PortUse::Reuse`] (the default for ordinary dials, and what DCUtR's `override_role()`
+    ///   emits as `(Listener, Reuse)`) cannot be honoured; it is downgraded best-effort to a fresh
+    ///   ephemeral socket and logged at `trace`.
     fn dial(
         &mut self,
         addr: Multiaddr,
-        _opts: DialOpts,
+        opts: DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         // Return `MultiaddrNotSupported` for non-WebTransport addresses so that transport
         // combinators (e.g. `OrTransport`) keep trying other transports for this address.
@@ -169,6 +200,29 @@ impl libp2p_core::Transport for Transport {
         // so dialing is impossible.
         if cert_hashes.is_empty() {
             return Err(TransportError::Other(Error::MissingCerthashes));
+        }
+
+        // Branch on the (role, port_use) tuple, matching libp2p-quic. Only a genuine coordinated
+        // hole-punch — role == Listener AND port_use == New — needs to dial from the listener's
+        // socket, which `wtransport` cannot do. `(Listener, Reuse)` is what DCUtR's
+        // `override_role()` emits and what quic treats as a normal reuse dial; we serve it as an
+        // ordinary fresh-socket dial.
+        match (opts.role, opts.port_use) {
+            (CoreEndpoint::Listener, PortUse::New) => {
+                return Err(TransportError::Other(Error::HolePunchingUnsupported));
+            }
+            (_, PortUse::Reuse) => {
+                // `PortUse::Reuse` (the default for ordinary dials) cannot be honoured:
+                // `wtransport` binds a fresh socket per client endpoint and offers no way to share
+                // the listener's socket without two quinn endpoints racing recv() on one fd.
+                // Best-effort downgrade to a fresh ephemeral socket; logged at `trace` because it
+                // is the expected default path, not an exceptional event.
+                tracing::trace!(
+                    %addr,
+                    "WebTransport ignores PortUse::Reuse; dialing from a fresh ephemeral socket"
+                );
+            }
+            _ => {}
         }
 
         let keypair = self.config.keypair.clone();
@@ -854,7 +908,9 @@ async fn connect(
     expected_peer_id: Option<PeerId>,
     keypair: Keypair,
 ) -> Result<(PeerId, Connection), Error> {
-    // Bind an ephemeral local UDP socket of the same address family as the remote.
+    // Always bind a fresh ephemeral local UDP socket of the same address family as the remote;
+    // `PortUse::Reuse` is unsupported by design (see `Transport::dial`), since `wtransport`'s
+    // client endpoint cannot share the listener's socket.
     let bind_addr: SocketAddr = if socket_addr.is_ipv6() {
         (Ipv6Addr::UNSPECIFIED, 0).into()
     } else {
@@ -1072,6 +1128,138 @@ mod test {
     // sequential-windows-with-skew model is well-formed, and exceed `ROTATE_BEFORE_EXPIRY` so the
     // initial active cert is not already "due".
     const TEST_VALIDITY: TimeDuration = TimeDuration::hours(4);
+
+    /// Build a transport plus a dialable WebTransport multiaddr (with a real `/certhash`) that
+    /// passes the `multiaddr_to_dial_addr` / `MissingCerthashes` guards, so `dial()`'s
+    /// `(role, port_use)` branching can be exercised without any network I/O.
+    fn transport_and_dial_addr() -> (Transport, Multiaddr) {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let hashes = vec![cert.cert_hash()];
+        let addr = socketaddr_to_multiaddr_with_hashes(
+            &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
+            &hashes,
+        );
+        let config = Config::new(&keypair, cert);
+        (Transport::new(config), addr)
+    }
+
+    fn dial_opts(role: CoreEndpoint, port_use: PortUse) -> DialOpts {
+        DialOpts { role, port_use }
+    }
+
+    #[test]
+    fn dial_holepunch_new_port_rejected() {
+        let (mut transport, addr) = transport_and_dial_addr();
+        let res = transport.dial(addr, dial_opts(CoreEndpoint::Listener, PortUse::New));
+        assert!(matches!(
+            res,
+            Err(TransportError::Other(Error::HolePunchingUnsupported))
+        ));
+    }
+
+    #[test]
+    fn dial_listener_reuse_proceeds() {
+        // Guards the F1 fix: `(Listener, Reuse)` (what DCUtR emits) must NOT be a hole-punch error.
+        let (mut transport, addr) = transport_and_dial_addr();
+        let res = transport.dial(addr, dial_opts(CoreEndpoint::Listener, PortUse::Reuse));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn dial_dialer_reuse_proceeds() {
+        let (mut transport, addr) = transport_and_dial_addr();
+        let res = transport.dial(addr, dial_opts(CoreEndpoint::Dialer, PortUse::Reuse));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn dial_dialer_new_proceeds() {
+        let (mut transport, addr) = transport_and_dial_addr();
+        let res = transport.dial(addr, dial_opts(CoreEndpoint::Dialer, PortUse::New));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn dial_missing_certhash_errors_first() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        let addr: Multiaddr = "/ip4/127.0.0.1/udp/4001/quic-v1/webtransport"
+            .parse()
+            .unwrap();
+        // Even a `(Listener, New)` dial must hit the certhash guard first.
+        let res = transport.dial(addr, dial_opts(CoreEndpoint::Listener, PortUse::New));
+        assert!(matches!(
+            res,
+            Err(TransportError::Other(Error::MissingCerthashes))
+        ));
+    }
+
+    #[test]
+    fn dial_non_webtransport_addr_unsupported() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        let addr: Multiaddr = "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap();
+        let res = transport.dial(addr, dial_opts(CoreEndpoint::Dialer, PortUse::Reuse));
+        assert!(matches!(res, Err(TransportError::MultiaddrNotSupported(_))));
+    }
+
+    #[test]
+    fn error_holepunch_display() {
+        assert_eq!(
+            Error::HolePunchingUnsupported.to_string(),
+            "WebTransport does not support dialing as a listener (hole punching)"
+        );
+    }
+
+    #[test]
+    fn multiaddr_to_dial_addr_matrix() {
+        // Happy path: socket addr + one certhash + peer id.
+        let (_keypair, cert) = generate_keypair_and_cert();
+        let hash = cert.cert_hash();
+        let peer = Keypair::generate_ed25519().public().to_peer_id();
+        let addr = socketaddr_to_multiaddr_with_hashes(
+            &SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
+            std::slice::from_ref(&hash),
+        )
+        .with(Protocol::P2p(peer));
+        let (sa, hashes, pid) = multiaddr_to_dial_addr(&addr).expect("dialable");
+        assert_eq!(sa, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001));
+        assert_eq!(hashes, vec![hash]);
+        assert_eq!(pid, Some(peer));
+
+        // No certhash: still parses, with an empty hash set and no peer id.
+        let no_hash: Multiaddr = "/ip4/127.0.0.1/udp/4001/quic-v1/webtransport"
+            .parse()
+            .unwrap();
+        let (_, hashes, pid) = multiaddr_to_dial_addr(&no_hash).expect("dialable");
+        assert!(hashes.is_empty());
+        assert!(pid.is_none());
+
+        // Not a WebTransport address.
+        assert!(
+            multiaddr_to_dial_addr(&"/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap()).is_none()
+        );
+        // TCP base is rejected.
+        assert!(multiaddr_to_dial_addr(&"/ip4/127.0.0.1/tcp/4001".parse().unwrap()).is_none());
+        // Double `/webtransport` is rejected.
+        assert!(
+            multiaddr_to_dial_addr(
+                &"/ip4/127.0.0.1/udp/4001/quic-v1/webtransport/webtransport"
+                    .parse()
+                    .unwrap()
+            )
+            .is_none()
+        );
+        // DNS base is rejected.
+        assert!(
+            multiaddr_to_dial_addr(
+                &"/dns4/example.com/udp/4001/quic-v1/webtransport"
+                    .parse()
+                    .unwrap()
+            )
+            .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn test_close_listener() {

@@ -1,3 +1,23 @@
+// Copyright 2024 Protocol Labs.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
 use std::time::Duration;
 
 use quinn::{MtuDiscoveryConfig, VarInt};
@@ -247,8 +267,23 @@ impl Config {
     }
 }
 
+/// ALPN protocol identifiers offered by a libp2p WebTransport server.
+///
+/// WebTransport is layered on HTTP/3, so the only ALPN value negotiated is `h3`
+/// (the `http3.NextProtoH3` constant in quic-go). This matches go-libp2p — which
+/// sets `NextProtos = ["h3"]` on both its WebTransport listener and dialer — and the
+/// browser WebTransport stack, which negotiates `h3` internally.
+///
+/// The libp2p identity is **not** authenticated in TLS here; it is authenticated
+/// out-of-band over a Noise handshake on the first stream (see the crate-level docs).
+/// The `libp2p` ALPN used by the raw QUIC/TLS transport (`libp2p_tls::P2P_ALPN`) is
+/// therefore deliberately NOT offered for WebTransport.
+///
+/// NOTE for a future same-port "Mixed" mode (raw QUIC + WebTransport sharing one UDP
+/// port): keep this set disjoint from the QUIC transport's `["libp2p"]` so the
+/// negotiated ALPN can demultiplex the two protocols. Do not add `libp2p` here.
 pub(crate) fn alpn_protocols() -> Vec<Vec<u8>> {
-    vec![libp2p_tls::P2P_ALPN.to_vec(), b"h3".to_vec()]
+    vec![b"h3".to_vec()]
 }
 
 /// `Clone`-able QUIC transport parameters used to (re)build a [`QuicTransportConfig`].
@@ -471,5 +506,34 @@ mod tests {
         let hashes = config.cert_hashes();
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].digest().len(), 32);
+    }
+
+    #[test]
+    fn alpn_protocols_is_h3_only() {
+        assert_eq!(alpn_protocols(), vec![b"h3".to_vec()]);
+    }
+
+    #[test]
+    fn alpn_does_not_offer_libp2p() {
+        // Regression guard (T1/T6): the WebTransport endpoint cannot authenticate libp2p
+        // identity in TLS, so it must never advertise the raw QUIC/TLS `libp2p` ALPN.
+        assert!(!alpn_protocols().contains(&libp2p_tls::P2P_ALPN.to_vec()));
+    }
+
+    #[test]
+    fn alpn_h3_bytes_exact() {
+        let protocols = alpn_protocols();
+        assert_eq!(protocols.len(), 1);
+        assert_eq!(protocols[0], vec![0x68, 0x33]); // b"h3"
+    }
+
+    #[test]
+    fn server_tls_config_builds() {
+        // `server_tls_config()` must not panic with the single-element ALPN list.
+        let keypair = libp2p_identity::Keypair::generate_ed25519();
+        let not_before = time::OffsetDateTime::now_utc();
+        let cert = Certificate::generate(not_before).expect("generate certificate");
+        let config = Config::new(&keypair, cert);
+        let _ = config.server_tls_config();
     }
 }
