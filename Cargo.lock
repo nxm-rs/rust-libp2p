@@ -8229,7 +8229,6 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 [[package]]
 name = "wtransport"
 version = "0.7.1"
-source = "git+https://github.com/mfw78/wtransport.git?rev=8ebdde112e3e7dd558e662a2e7ebc147e2547112#8ebdde112e3e7dd558e662a2e7ebc147e2547112"
 dependencies = [
  "bytes",
  "pem",
@@ -8252,7 +8251,6 @@ dependencies = [
 [[package]]
 name = "wtransport-proto"
 version = "0.7.1"
-source = "git+https://github.com/mfw78/wtransport.git?rev=8ebdde112e3e7dd558e662a2e7ebc147e2547112#8ebdde112e3e7dd558e662a2e7ebc147e2547112"
 dependencies = [
  "httlib-huffman",
  "octets",

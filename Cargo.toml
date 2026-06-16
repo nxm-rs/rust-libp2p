@@ -175,8 +175,15 @@ libp2p-identity = { path = "identity" }
 # Pinned to our own fork carrying the fix from BiagioFesta/wtransport#310 — by rev, on a repo we
 # control, so the ref can't be force-pushed or deleted out from under us.
 # TODO: drop once a wtransport release contains the header-ordering fix.
-wtransport = { git = "https://github.com/mfw78/wtransport.git", rev = "8ebdde112e3e7dd558e662a2e7ebc147e2547112" }
-wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", rev = "8ebdde112e3e7dd558e662a2e7ebc147e2547112" }
+#
+# DRIVER A (WebTransport hole punching): temporarily repointed to a local path checkout of the
+# same fork while we add a client-side "drive the H3/WT handshake over an externally-owned
+# `quinn::Connection`" API (`wtransport::endpoint::connect_over_quic`). This lets WebTransport
+# share the libp2p-quic UDP endpoint and inherit QUIC hole punching. The `quinn` feature exposes
+# both this new client entrypoint and the existing `with_quic_{incoming,connecting}` server hooks.
+# TODO: push the fork API upstream / to the fork repo and pin by rev again.
+wtransport = { path = "/code/nxm/wtransport-fork/wtransport", features = ["quinn"] }
+wtransport-proto = { path = "/code/nxm/wtransport-fork/wtransport-proto" }
 
 [workspace.lints]
 rust.unreachable_pub = "warn"
