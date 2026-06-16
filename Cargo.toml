@@ -182,7 +182,7 @@ libp2p-identity = { path = "identity" }
 # share the libp2p-quic UDP endpoint and inherit QUIC hole punching. The `quinn` feature exposes
 # both this new client entrypoint and the existing `with_quic_{incoming,connecting}` server hooks.
 # TODO: push the fork API upstream / to the fork repo and pin by rev again.
-wtransport = { path = "/code/nxm/wtransport-fork/wtransport", features = ["quinn"] }
+wtransport = { path = "/code/nxm/wtransport-fork/wtransport" }
 wtransport-proto = { path = "/code/nxm/wtransport-fork/wtransport-proto" }
 
 [workspace.lints]
