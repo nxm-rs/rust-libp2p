@@ -34,16 +34,10 @@ use libp2p_swarm::{
 
 /// Oneshot timer for swarm-test's event deadlines.
 ///
-/// Native rides tokio's clock so `tokio::time::pause` drives the deadline under test; wasm32 keeps
-/// the runtime-agnostic global timer.
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+/// Rides tokio's clock so `tokio::time::pause` drives the deadline under test when a runtime is
+/// present, falling back to the runtime-agnostic global timer off-runtime and on wasm32.
 fn deadline(duration: Duration) -> impl std::future::Future<Output = ()> + Unpin {
-    Box::pin(tokio::time::sleep(duration))
-}
-
-#[cfg(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown"))]
-fn deadline(duration: Duration) -> impl std::future::Future<Output = ()> + Unpin {
-    futures_timer::Delay::new(duration)
+    libp2p_timer::Delay::new(duration)
 }
 
 /// An extension trait for [`Swarm`] that makes it
@@ -255,7 +249,7 @@ where
     TBehaviour2::ToSwarm: Debug,
     P: FnMut(&Swarm<TBehaviour1>, &Swarm<TBehaviour2>) -> bool,
 {
-    let mut deadline = futures_timer::Delay::new(timeout);
+    let mut deadline = libp2p_timer::Delay::new(timeout);
 
     loop {
         if predicate(swarm1, swarm2) {
