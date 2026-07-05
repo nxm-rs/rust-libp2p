@@ -32,6 +32,20 @@ use libp2p_swarm::{
     dial_opts::{DialOpts, PeerCondition},
 };
 
+/// Oneshot timer for swarm-test's event deadlines.
+///
+/// Native rides tokio's clock so `tokio::time::pause` drives the deadline under test; wasm32 keeps
+/// the runtime-agnostic global timer.
+#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+fn deadline(duration: Duration) -> impl std::future::Future<Output = ()> + Unpin {
+    Box::pin(tokio::time::sleep(duration))
+}
+
+#[cfg(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown"))]
+fn deadline(duration: Duration) -> impl std::future::Future<Output = ()> + Unpin {
+    futures_timer::Delay::new(duration)
+}
+
 /// An extension trait for [`Swarm`] that makes it
 /// easier to set up a network of [`Swarm`]s for tests.
 #[async_trait]
@@ -474,11 +488,8 @@ where
     }
 
     async fn next_swarm_event(&mut self) -> SwarmEvent<<Self::NB as NetworkBehaviour>::ToSwarm> {
-        match futures::future::select(
-            futures_timer::Delay::new(Duration::from_secs(10)),
-            self.select_next_some(),
-        )
-        .await
+        match futures::future::select(deadline(Duration::from_secs(10)), self.select_next_some())
+            .await
         {
             Either::Left(((), _)) => panic!("Swarm did not emit an event within 10s"),
             Either::Right((event, _)) => {

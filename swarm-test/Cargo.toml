@@ -23,6 +23,10 @@ futures = { workspace = true }
 tracing = { workspace = true }
 futures-timer = { workspace = true }
 
+# Native rides tokio's clock for event deadlines so paused test time drives them.
+[target.'cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))'.dependencies]
+tokio = { workspace = true, features = ["time"] }
+
 [features]
 default = ["tokio"]
 

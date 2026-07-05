@@ -1,5 +1,6 @@
 ## 0.7.0
 
+- Ride tokio's clock for the `next_swarm_event` deadline on native targets so `tokio::time::pause` drives it under test; wasm32 keeps the runtime-agnostic timer.
 - Add `SwarmExt::new_ephemeral_tokio_with_keypair`, `SwarmExt::new_ephemeral_memory_tokio`, and `SwarmExt::new_ephemeral_memory_tokio_with_keypair` for caller-supplied keypairs and memory-only transports.
   See [PR 6](https://github.com/nxm-rs/rust-libp2p/pull/6).
 - Add `drive_until` and `drive_for` helpers for predicate- and deadline-based swarm driving.
