@@ -38,7 +38,6 @@ use std::{
 pub use error::ConnectionError;
 pub(crate) use error::{PendingInboundConnectionError, PendingOutboundConnectionError};
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
-use futures_timer::Delay;
 use libp2p_core::{
     Endpoint,
     connection::ConnectedPoint,
@@ -60,6 +59,7 @@ use crate::{
         ProtocolsChange, UpgradeInfoSend,
     },
     stream::ActiveStreamCounter,
+    timer::Delay,
     upgrade::{InboundUpgradeSend, OutboundUpgradeSend},
 };
 
@@ -804,6 +804,14 @@ mod tests {
             .with_env_filter(EnvFilter::from_default_env())
             .try_init();
 
+        // Polling a connection arms substream upgrade timers against tokio's clock, which needs a
+        // time driver in scope; the timers are only constructed here, never driven.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
         fn prop(max_negotiating_inbound_streams: u8) {
             let max_negotiating_inbound_streams: usize = max_negotiating_inbound_streams.into();
 
@@ -831,8 +839,8 @@ mod tests {
         QuickCheck::new().quickcheck(prop as fn(_));
     }
 
-    #[test]
-    fn outbound_stream_timeout_starts_on_request() {
+    #[tokio::test(start_paused = true)]
+    async fn outbound_stream_timeout_starts_on_request() {
         let upgrade_timeout = Duration::from_secs(1);
         let mut connection = Connection::new(
             StreamMuxerBox::new(PendingStreamMuxer),
@@ -843,9 +851,10 @@ mod tests {
         );
 
         connection.handler.open_new_outbound();
+        // First poll arms the upgrade timeout against the (paused) tokio clock.
         let _ = connection.poll_noop_waker();
 
-        std::thread::sleep(upgrade_timeout + Duration::from_secs(1));
+        tokio::time::advance(upgrade_timeout + Duration::from_secs(1)).await;
 
         let _ = connection.poll_noop_waker();
 
@@ -946,7 +955,7 @@ mod tests {
         assert_eq!(connection.handler.remote_removed, vec![vec!["/bar"]]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn idle_timeout_with_keep_alive_no() {
         let idle_timeout = Duration::from_millis(100);
 
@@ -958,9 +967,10 @@ mod tests {
             idle_timeout,
         );
 
+        // First poll arms the keep-alive timer against the (paused) tokio clock.
         assert!(connection.poll_noop_waker().is_pending());
 
-        tokio::time::sleep(idle_timeout).await;
+        tokio::time::advance(idle_timeout + Duration::from_millis(1)).await;
 
         assert!(matches!(
             connection.poll_noop_waker(),

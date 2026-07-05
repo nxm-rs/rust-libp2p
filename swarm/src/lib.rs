@@ -59,6 +59,7 @@ mod stream;
 mod stream_protocol;
 #[cfg(test)]
 mod test;
+mod timer;
 mod upgrade;
 
 pub mod behaviour;
