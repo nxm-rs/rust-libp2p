@@ -14,7 +14,7 @@ categories = ["network-programming", "asynchronous"]
 either = "1.16"
 fnv = "1.0"
 futures = { workspace = true, features = ["executor", "thread-pool"] }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 web-time = { workspace = true }
 libp2p-identity = { workspace = true, features = ["peerid", "ed25519"] }
 multiaddr = { workspace = true }

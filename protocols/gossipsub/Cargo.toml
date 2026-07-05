@@ -23,7 +23,7 @@ bytes.workspace = true
 either = "1.16"
 fnv = "1.0.7"
 futures = { workspace = true }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 hashlink = { workspace = true }
 hex_fmt = "0.3.0"
 web-time = { workspace = true }
@@ -49,7 +49,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "macros"] }
 
 [target.'cfg(target_family="wasm")'.dependencies]
-futures-timer = { workspace = true, features = ["wasm-bindgen"] }
 getrandom = { workspace = true }
 
 # Passing arguments to the docsrs builder in order to properly document cfg's.

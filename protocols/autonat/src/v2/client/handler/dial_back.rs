@@ -22,7 +22,7 @@ pub struct Handler {
 impl Handler {
     pub(crate) fn new() -> Self {
         Self {
-            inbound: StreamSet::new(|| futures_bounded::Delay::tokio(Duration::from_secs(5)), 2),
+            inbound: StreamSet::new(|| libp2p_timer::bounded_delay(Duration::from_secs(5)), 2),
         }
     }
 }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use futures::FutureExt;
-use futures_timer::Delay;
+use libp2p_timer::Delay;
 
 /// Default value chosen at `<https://github.com/libp2p/rust-libp2p/pull/4838#discussion_r1490184754>`.
 pub(crate) const DEFAULT_AUTOMATIC_THROTTLE: Duration = Duration::from_millis(500);

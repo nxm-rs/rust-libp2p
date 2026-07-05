@@ -24,7 +24,7 @@ use futures::{
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, SinkExt, Stream, StreamExt,
     future::{Either, select},
 };
-use futures_timer::Delay;
+use libp2p_timer::Delay;
 use web_time::Instant;
 
 use crate::{Final, Intermediate, Run, RunDuration, RunParams, RunUpdate};

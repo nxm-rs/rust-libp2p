@@ -14,7 +14,7 @@ categories = ["network-programming", "asynchronous"]
 asynchronous-codec = { workspace = true }
 bimap = "0.6.3"
 futures = { workspace = true, features = ["std"] }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 hashlink = { workspace = true }
 web-time = { workspace = true }
 libp2p-core = { workspace = true }

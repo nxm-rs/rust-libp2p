@@ -696,8 +696,8 @@ impl Decoder for GossipsubCodec {
 mod tests {
     use std::{error::Error, time::Duration};
 
-    use futures_timer::Delay;
     use libp2p_identity::Keypair;
+    use libp2p_timer::Delay;
     use quickcheck::*;
 
     use super::*;

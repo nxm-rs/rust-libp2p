@@ -91,10 +91,7 @@ impl Handler {
     pub(crate) fn new() -> Self {
         Self {
             queued_events: VecDeque::new(),
-            outbound: FuturesMap::new(
-                || futures_bounded::Delay::tokio(Duration::from_secs(10)),
-                10,
-            ),
+            outbound: FuturesMap::new(|| libp2p_timer::bounded_delay(Duration::from_secs(10)), 10),
             queued_streams: VecDeque::default(),
         }
     }

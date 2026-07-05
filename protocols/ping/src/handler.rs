@@ -31,13 +31,13 @@ use futures::{
     future::{BoxFuture, Either},
     prelude::*,
 };
-use futures_timer::Delay;
 use libp2p_core::upgrade::ReadyUpgrade;
 use libp2p_swarm::{
     ConnectionHandler, ConnectionHandlerEvent, Stream, StreamProtocol, StreamUpgradeError,
     SubstreamProtocol,
     handler::{ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound},
 };
+use libp2p_timer::Delay;
 
 use crate::{PROTOCOL_NAME, protocol};
 

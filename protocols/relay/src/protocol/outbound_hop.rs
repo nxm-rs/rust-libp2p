@@ -23,10 +23,10 @@ use std::{io, time::Duration};
 use asynchronous_codec::{Framed, FramedParts};
 use bytes::Bytes;
 use futures::prelude::*;
-use futures_timer::Delay;
 use libp2p_core::Multiaddr;
 use libp2p_identity::PeerId;
 use libp2p_swarm::Stream;
+use libp2p_timer::Delay;
 use thiserror::Error;
 use web_time::SystemTime;
 
