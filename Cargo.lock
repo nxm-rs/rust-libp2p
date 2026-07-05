@@ -1648,6 +1648,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b604752cefc5aa3ab98992a107a8bd99465d2825c1584e0b60cb6957b21e19d7"
 dependencies = [
+ "futures-timer",
  "futures-util",
  "tokio",
 ]
@@ -3586,6 +3587,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "libp2p-timer"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "futures-bounded",
+ "futures-timer",
+ "tokio",
 ]
 
 [[package]]
