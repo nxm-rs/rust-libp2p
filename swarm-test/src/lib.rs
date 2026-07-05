@@ -49,6 +49,38 @@ pub trait SwarmExt {
     where
         Self: Sized;
 
+    /// Like [`SwarmExt::new_ephemeral_tokio`] but with a caller-supplied identity.
+    ///
+    /// Seeding lives with the caller, so tests can derive a deterministic [`PeerId`] and assert on
+    /// properties of the identity rather than the random one generated internally.
+    #[cfg(feature = "tokio")]
+    fn new_ephemeral_tokio_with_keypair(
+        identity: libp2p_identity::Keypair,
+        behaviour_fn: impl FnOnce(libp2p_identity::Keypair) -> Self::NB,
+    ) -> Self
+    where
+        Self: Sized;
+
+    /// Like [`SwarmExt::new_ephemeral_tokio`] but with a memory-only transport.
+    ///
+    /// The TCP transport is omitted entirely, so the swarm never binds an operating-system socket.
+    /// Use this for in-process topologies where a TCP listener is unnecessary.
+    #[cfg(feature = "tokio")]
+    fn new_ephemeral_memory_tokio(
+        behaviour_fn: impl FnOnce(libp2p_identity::Keypair) -> Self::NB,
+    ) -> Self
+    where
+        Self: Sized;
+
+    /// Like [`SwarmExt::new_ephemeral_memory_tokio`] but with a caller-supplied identity.
+    #[cfg(feature = "tokio")]
+    fn new_ephemeral_memory_tokio_with_keypair(
+        identity: libp2p_identity::Keypair,
+        behaviour_fn: impl FnOnce(libp2p_identity::Keypair) -> Self::NB,
+    ) -> Self
+    where
+        Self: Sized;
+
     /// Establishes a connection to the given [`Swarm`], polling both of them until the connection
     /// is established.
     ///
@@ -187,6 +219,62 @@ where
     )
 }
 
+/// Drives two [`Swarm`]s until `predicate` holds or `timeout` elapses.
+///
+/// The predicate observes both [`Swarm`]s after every event, so callers can assert on accumulated
+/// state (connected peers, routing tables, address books) instead of counting events exactly. Both
+/// swarms are polled throughout, so neither starves the other while the condition converges.
+///
+/// Returns `true` if the predicate held before the deadline, `false` if the deadline elapsed first.
+/// Prefer this over [`drive`] when the exact number of intervening events is not part of the
+/// property under test.
+pub async fn drive_until<TBehaviour1, TBehaviour2, P>(
+    swarm1: &mut Swarm<TBehaviour1>,
+    swarm2: &mut Swarm<TBehaviour2>,
+    timeout: Duration,
+    mut predicate: P,
+) -> bool
+where
+    TBehaviour1: NetworkBehaviour + Send,
+    TBehaviour1::ToSwarm: Debug,
+    TBehaviour2: NetworkBehaviour + Send,
+    TBehaviour2::ToSwarm: Debug,
+    P: FnMut(&Swarm<TBehaviour1>, &Swarm<TBehaviour2>) -> bool,
+{
+    let mut deadline = futures_timer::Delay::new(timeout);
+
+    loop {
+        if predicate(swarm1, swarm2) {
+            return true;
+        }
+
+        let next = futures::future::select(swarm1.select_next_some(), swarm2.select_next_some());
+        match futures::future::select(&mut deadline, next).await {
+            Either::Left(((), _)) => return predicate(swarm1, swarm2),
+            Either::Right((Either::Left((event, _)), _)) => tracing::trace!(swarm1 = ?event),
+            Either::Right((Either::Right((event, _)), _)) => tracing::trace!(swarm2 = ?event),
+        }
+    }
+}
+
+/// Drives two [`Swarm`]s for the given duration, polling both to completion of the interval.
+///
+/// Neither swarm is inspected; this only guarantees both keep making progress for `duration`, which
+/// is useful to let a topology settle before asserting on it. For a condition-terminated variant
+/// use [`drive_until`].
+pub async fn drive_for<TBehaviour1, TBehaviour2>(
+    swarm1: &mut Swarm<TBehaviour1>,
+    swarm2: &mut Swarm<TBehaviour2>,
+    duration: Duration,
+) where
+    TBehaviour1: NetworkBehaviour + Send,
+    TBehaviour1::ToSwarm: Debug,
+    TBehaviour2: NetworkBehaviour + Send,
+    TBehaviour2::ToSwarm: Debug,
+{
+    drive_until(swarm1, swarm2, duration, |_, _| false).await;
+}
+
 pub trait TryIntoOutput<O>: Sized {
     fn try_into_output(self) -> Result<O, Self>;
 }
@@ -204,6 +292,47 @@ impl<TBehaviourOutEvent> TryIntoOutput<SwarmEvent<TBehaviourOutEvent>>
     }
 }
 
+/// Builds a `tokio` swarm from a fixed identity, optionally omitting the TCP transport.
+#[cfg(feature = "tokio")]
+fn build_ephemeral_tokio<B>(
+    identity: libp2p_identity::Keypair,
+    memory_only: bool,
+    behaviour_fn: impl FnOnce(libp2p_identity::Keypair) -> B,
+) -> Swarm<B>
+where
+    B: NetworkBehaviour + Send,
+{
+    use libp2p_core::{Transport as _, transport::MemoryTransport, upgrade::Version};
+
+    let peer_id = PeerId::from(identity.public());
+    let authenticate = libp2p_plaintext::Config::new(&identity);
+    let multiplex = libp2p_yamux::Config::default();
+
+    let transport = if memory_only {
+        MemoryTransport::default()
+            .upgrade(Version::V1)
+            .authenticate(authenticate)
+            .multiplex(multiplex)
+            .timeout(Duration::from_secs(20))
+            .boxed()
+    } else {
+        MemoryTransport::default()
+            .or_transport(libp2p_tcp::tokio::Transport::default())
+            .upgrade(Version::V1)
+            .authenticate(authenticate)
+            .multiplex(multiplex)
+            .timeout(Duration::from_secs(20))
+            .boxed()
+    };
+
+    Swarm::new(
+        transport,
+        behaviour_fn(identity),
+        peer_id,
+        libp2p_swarm::Config::with_tokio_executor(),
+    )
+}
+
 #[async_trait]
 impl<B> SwarmExt for Swarm<B>
 where
@@ -217,26 +346,47 @@ where
     where
         Self: Sized,
     {
-        use libp2p_core::{Transport as _, transport::MemoryTransport, upgrade::Version};
-        use libp2p_identity::Keypair;
-
-        let identity = Keypair::generate_ed25519();
-        let peer_id = PeerId::from(identity.public());
-
-        let transport = MemoryTransport::default()
-            .or_transport(libp2p_tcp::tokio::Transport::default())
-            .upgrade(Version::V1)
-            .authenticate(libp2p_plaintext::Config::new(&identity))
-            .multiplex(libp2p_yamux::Config::default())
-            .timeout(Duration::from_secs(20))
-            .boxed();
-
-        Swarm::new(
-            transport,
-            behaviour_fn(identity),
-            peer_id,
-            libp2p_swarm::Config::with_tokio_executor(),
+        build_ephemeral_tokio(
+            libp2p_identity::Keypair::generate_ed25519(),
+            false,
+            behaviour_fn,
         )
+    }
+
+    #[cfg(feature = "tokio")]
+    fn new_ephemeral_tokio_with_keypair(
+        identity: libp2p_identity::Keypair,
+        behaviour_fn: impl FnOnce(libp2p_identity::Keypair) -> Self::NB,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        build_ephemeral_tokio(identity, false, behaviour_fn)
+    }
+
+    #[cfg(feature = "tokio")]
+    fn new_ephemeral_memory_tokio(
+        behaviour_fn: impl FnOnce(libp2p_identity::Keypair) -> Self::NB,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        build_ephemeral_tokio(
+            libp2p_identity::Keypair::generate_ed25519(),
+            true,
+            behaviour_fn,
+        )
+    }
+
+    #[cfg(feature = "tokio")]
+    fn new_ephemeral_memory_tokio_with_keypair(
+        identity: libp2p_identity::Keypair,
+        behaviour_fn: impl FnOnce(libp2p_identity::Keypair) -> Self::NB,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        build_ephemeral_tokio(identity, true, behaviour_fn)
     }
 
     async fn connect<T>(&mut self, other: &mut Swarm<T>)
@@ -439,5 +589,54 @@ where
             (memory_multiaddr, tcp_multiaddr)
         }
         .boxed()
+    }
+}
+
+#[cfg(all(test, feature = "tokio"))]
+mod tests {
+    use libp2p_identity::Keypair;
+    use libp2p_swarm::dummy;
+
+    use super::*;
+
+    #[test]
+    fn seeded_keypair_yields_deterministic_peer_id() {
+        let identity = Keypair::generate_ed25519();
+        let expected = PeerId::from(identity.public());
+
+        let swarm = Swarm::new_ephemeral_memory_tokio_with_keypair(identity, |_| dummy::Behaviour);
+
+        assert_eq!(*swarm.local_peer_id(), expected);
+    }
+
+    #[test]
+    fn drive_until_returns_immediately_when_predicate_holds() {
+        let mut a = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+        let mut b = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+
+        // Idle swarms never emit events, so a `true` result can only come from the pre-poll check.
+        let held = futures::executor::block_on(drive_until(
+            &mut a,
+            &mut b,
+            Duration::from_secs(30),
+            |_, _| true,
+        ));
+
+        assert!(held);
+    }
+
+    #[test]
+    fn drive_until_returns_false_once_deadline_elapses() {
+        let mut a = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+        let mut b = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+
+        let held = futures::executor::block_on(drive_until(
+            &mut a,
+            &mut b,
+            Duration::from_millis(50),
+            |_, _| false,
+        ));
+
+        assert!(!held);
     }
 }
