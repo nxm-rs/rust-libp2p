@@ -805,8 +805,11 @@ mod tests {
             .try_init();
 
         // Polling a connection arms substream upgrade timers against tokio's clock, which needs a
-        // runtime in scope.
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // time driver in scope; the timers are only constructed here, never driven.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
         let _guard = runtime.enter();
 
         fn prop(max_negotiating_inbound_streams: u8) {
