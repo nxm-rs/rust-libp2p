@@ -32,7 +32,6 @@ use futures::{
     io::AsyncWriteExt,
     stream::{FuturesUnordered, StreamExt},
 };
-use futures_timer::Delay;
 use libp2p_core::{
     ConnectedPoint, Multiaddr,
     upgrade::{DeniedUpgrade, ReadyUpgrade},
@@ -43,6 +42,7 @@ use libp2p_swarm::{
     StreamUpgradeError, SubstreamProtocol,
     handler::{ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound},
 };
+use libp2p_timer::Delay;
 use web_time::Instant;
 
 use crate::{
@@ -403,11 +403,11 @@ impl Handler {
     pub fn new(config: Config, endpoint: ConnectedPoint, status: behaviour::Status) -> Handler {
         Handler {
             inbound_workers: futures_bounded::FuturesSet::new(
-                move || futures_bounded::Delay::tokio(STREAM_TIMEOUT),
+                move || libp2p_timer::bounded_delay(STREAM_TIMEOUT),
                 MAX_CONCURRENT_STREAMS_PER_CONNECTION,
             ),
             outbound_workers: futures_bounded::FuturesMap::new(
-                move || futures_bounded::Delay::tokio(STREAM_TIMEOUT),
+                move || libp2p_timer::bounded_delay(STREAM_TIMEOUT),
                 MAX_CONCURRENT_STREAMS_PER_CONNECTION,
             ),
             endpoint,

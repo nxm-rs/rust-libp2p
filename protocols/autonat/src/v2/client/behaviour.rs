@@ -7,7 +7,6 @@ use std::{
 
 use either::Either;
 use futures::FutureExt;
-use futures_timer::Delay;
 use libp2p_core::{Endpoint, Multiaddr, transport::PortUse};
 use libp2p_identity::PeerId;
 use libp2p_swarm::{
@@ -15,6 +14,7 @@ use libp2p_swarm::{
     NetworkBehaviour, NewExternalAddrCandidate, NotifyHandler, ToSwarm,
     behaviour::ConnectionEstablished,
 };
+use libp2p_timer::Delay;
 use rand::prelude::*;
 use rand_core::OsRng;
 

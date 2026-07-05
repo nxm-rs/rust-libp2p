@@ -14,21 +14,21 @@ categories = ["network-programming", "asynchronous"]
 either = "1.16.0"
 fnv = "1.0"
 futures = { workspace = true }
-futures-timer = { workspace = true }
 web-time = { workspace = true }
 hashlink = { workspace = true }
 libp2p-core = { workspace = true }
 libp2p-identity = { workspace = true }
 libp2p-swarm-derive = { workspace = true, optional = true }
+libp2p-timer = { workspace = true }
 multistream-select = { workspace = true }
 rand = { workspace = true }
 smallvec = "1.15.1"
 tracing = { workspace = true }
 
-# Native targets ride tokio's clock for internal connection deadlines so paused time drives them
-# under test; the executor support keys off the `tokio` feature below.
+# The `tokio` executor (gated by the `tokio` feature below) spawns onto the runtime, so it needs
+# `rt`; the connection deadlines now ride the shared `libp2p-timer` crate.
 [target.'cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))'.dependencies]
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt"] }
 
 [target.'cfg(target_family="wasm")'.dependencies]
 getrandom = { workspace = true }

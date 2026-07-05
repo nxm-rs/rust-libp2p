@@ -33,7 +33,7 @@ impl Handler {
         Self {
             pending_nonce: Some(cmd),
             requested_substream_nonce: None,
-            outbound: FuturesSet::new(|| futures_bounded::Delay::tokio(Duration::from_secs(10)), 5),
+            outbound: FuturesSet::new(|| libp2p_timer::bounded_delay(Duration::from_secs(10)), 5),
         }
     }
 }

@@ -13,7 +13,7 @@ categories = ["network-programming", "asynchronous"]
 [dependencies]
 async-trait = "0.1"
 futures = { workspace = true }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 hex = "0.4"
 if-watch = { workspace = true }
 libp2p-core = { workspace = true }

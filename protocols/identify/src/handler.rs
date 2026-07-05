@@ -28,7 +28,6 @@ use std::{
 use either::Either;
 use futures::prelude::*;
 use futures_bounded::Timeout;
-use futures_timer::Delay;
 use libp2p_core::{
     Multiaddr,
     upgrade::{ReadyUpgrade, SelectUpgrade},
@@ -42,6 +41,7 @@ use libp2p_swarm::{
         ProtocolSupport,
     },
 };
+use libp2p_timer::Delay;
 use smallvec::SmallVec;
 use tracing::Level;
 
@@ -139,7 +139,7 @@ impl Handler {
             remote_peer_id,
             events: SmallVec::new(),
             active_streams: futures_bounded::FuturesSet::new(
-                move || futures_bounded::Delay::tokio(STREAM_TIMEOUT),
+                move || libp2p_timer::bounded_delay(STREAM_TIMEOUT),
                 MAX_CONCURRENT_STREAMS_PER_CONNECTION,
             ),
             trigger_next_identify: Delay::new(Duration::ZERO),

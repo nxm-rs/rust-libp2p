@@ -41,12 +41,12 @@ use std::{
 };
 
 use futures::{future::Ready, prelude::*, stream::SelectAll};
-use futures_timer::Delay;
 use if_watch::IfEvent;
 use libp2p_core::{
     multiaddr::{Multiaddr, Protocol},
     transport::{DialOpts, ListenerId, PortUse, TransportError, TransportEvent},
 };
+use libp2p_timer::Delay;
 #[cfg(feature = "tokio")]
 pub use provider::tokio;
 use provider::{Incoming, Provider};

@@ -21,7 +21,6 @@
 #![cfg(test)]
 
 use futures::{future::poll_fn, prelude::*};
-use futures_timer::Delay;
 use libp2p_core::{
     Transport,
     multiaddr::{Protocol, multiaddr},
@@ -32,6 +31,7 @@ use libp2p_core::{
 use libp2p_identity as identity;
 use libp2p_noise as noise;
 use libp2p_swarm::{self as swarm, Swarm, SwarmEvent};
+use libp2p_timer::Delay;
 use libp2p_yamux as yamux;
 use quickcheck::*;
 use rand::{Rng, SeedableRng, random, rngs::StdRng, thread_rng};

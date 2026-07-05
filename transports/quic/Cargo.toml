@@ -10,7 +10,7 @@ license = "MIT"
 
 [dependencies]
 futures = { workspace = true }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 if-watch = { workspace = true }
 libp2p-core = { workspace = true }
 libp2p-tls = { workspace = true }

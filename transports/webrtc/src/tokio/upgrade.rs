@@ -28,9 +28,9 @@ use std::{
 };
 
 use futures::{channel::oneshot, future::Either};
-use futures_timer::Delay;
 use libp2p_identity as identity;
 use libp2p_identity::PeerId;
+use libp2p_timer::Delay;
 use libp2p_webrtc_utils::{Fingerprint, noise};
 use webrtc::{
     api::{APIBuilder, setting_engine::SettingEngine},

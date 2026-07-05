@@ -32,7 +32,6 @@ use as_client::AsClient;
 pub use as_client::{OutboundProbeError, OutboundProbeEvent};
 use as_server::AsServer;
 pub use as_server::{InboundProbeError, InboundProbeEvent};
-use futures_timer::Delay;
 use libp2p_core::{ConnectedPoint, Endpoint, Multiaddr, multiaddr::Protocol, transport::PortUse};
 use libp2p_identity::PeerId;
 use libp2p_request_response::{
@@ -43,6 +42,7 @@ use libp2p_swarm::{
     THandlerOutEvent, ToSwarm,
     behaviour::{AddressChange, ConnectionClosed, ConnectionEstablished, DialFailure, FromSwarm},
 };
+use libp2p_timer::Delay;
 use web_time::Instant;
 
 use crate::{

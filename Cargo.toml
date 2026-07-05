@@ -32,6 +32,7 @@ members = [
     "misc/quickcheck-ext",
     "misc/rw-stream-sink",
     "misc/server",
+    "misc/timer",
     "misc/webrtc-utils",
     "muxers/mplex",
     "muxers/test-harness",
@@ -107,6 +108,7 @@ libp2p-swarm = { version = "0.48.0", path = "swarm" }
 libp2p-swarm-derive = { version = "=0.36.0", path = "swarm-derive" } # `libp2p-swarm-derive` may not be compatible with different `libp2p-swarm` non-breaking releases. E.g. `libp2p-swarm` might introduce a new enum variant `FromSwarm` (which is `#[non-exhaustive]`) in a non-breaking release. Older versions of `libp2p-swarm-derive` would not forward this enum variant within the `NetworkBehaviour` hierarchy. Thus the version pinning is required.
 libp2p-swarm-test = { version = "0.7.0", path = "swarm-test" }
 libp2p-tcp = { version = "0.45.0", path = "transports/tcp" }
+libp2p-timer = { path = "misc/timer" }
 libp2p-tls = { version = "0.7.0", path = "transports/tls" }
 libp2p-uds = { version = "0.44.0", path = "transports/uds" }
 libp2p-upnp = { version = "0.7.0", path = "protocols/upnp" }
@@ -125,7 +127,7 @@ criterion = { version = "0.5.1" }
 bytes = "1.11.1"
 env_logger = "0.11"
 futures = "0.3.30"
-futures-bounded = { version = "0.3", features = ["tokio"] }
+futures-bounded = { version = "0.3", features = ["futures-timer"] }
 futures-rustls = { version = "0.26.0", default-features = false }
 futures-timer = "3.0"
 hex-literal = "0.4"
