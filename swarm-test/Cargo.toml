@@ -32,5 +32,8 @@ default = ["tokio"]
 
 tokio = ["libp2p-swarm/tokio", "libp2p-tcp/tokio"]
 
+[target.'cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
 [lints]
 workspace = true
