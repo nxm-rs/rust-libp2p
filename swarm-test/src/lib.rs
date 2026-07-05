@@ -608,4 +608,35 @@ mod tests {
 
         assert_eq!(*swarm.local_peer_id(), expected);
     }
+
+    #[test]
+    fn drive_until_returns_immediately_when_predicate_holds() {
+        let mut a = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+        let mut b = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+
+        // Idle swarms never emit events, so a `true` result can only come from the pre-poll check.
+        let held = futures::executor::block_on(drive_until(
+            &mut a,
+            &mut b,
+            Duration::from_secs(30),
+            |_, _| true,
+        ));
+
+        assert!(held);
+    }
+
+    #[test]
+    fn drive_until_returns_false_once_deadline_elapses() {
+        let mut a = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+        let mut b = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+
+        let held = futures::executor::block_on(drive_until(
+            &mut a,
+            &mut b,
+            Duration::from_millis(50),
+            |_, _| false,
+        ));
+
+        assert!(!held);
+    }
 }
