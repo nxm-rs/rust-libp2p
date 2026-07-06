@@ -1,5 +1,17 @@
 ## Unreleased
 
+- Source QUIC connections from a `libp2p-quicreuse` endpoint holder so WebTransport can co-listen
+  with plain QUIC on one UDP port, demultiplexed by the negotiated ALPN. `listen_on` registers the
+  `h3` ALPN together with the WebTransport server config (no client auth, certhash-pinned
+  certificate) on the holder and receives the routed inbound connections; the WebTransport session
+  is then driven over each routed connection by `wtransport` acting purely as the protocol engine
+  (it no longer owns a socket or endpoint). `Transport::with_shared_endpoint` accepts an externally
+  shared `SharedQuicEndpoint`, used for listeners and reuse-dials whose address matches it; a
+  transport built with `Transport::new` keeps its previous behaviour through a private holder.
+  Dials go through the holder's shared socket and keep pinning the presented certificate by the
+  SHA-256 hashes from the multiaddr `/certhash` components. Certificate rotation still lives in
+  this transport; the rotated server config is swapped in the holder's config map.
+
 - Correctness & safety fixes.
 
   - **`Certificate::parse` is now panic-free and bounds its allocations.** The four `.unwrap()`s

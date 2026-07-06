@@ -267,11 +267,15 @@ impl Config {
     }
 }
 
+/// The single ALPN a libp2p WebTransport server negotiates and registers with the shared
+/// endpoint holder for routing.
+pub(crate) const WEBTRANSPORT_ALPN: &[u8] = b"h3";
+
 /// ALPN protocol identifiers offered by a libp2p WebTransport server.
 ///
 /// WebTransport is layered on HTTP/3, so the only ALPN value negotiated is `h3`
-/// (the `http3.NextProtoH3` constant in quic-go). This matches go-libp2p — which
-/// sets `NextProtos = ["h3"]` on both its WebTransport listener and dialer — and the
+/// (the `http3.NextProtoH3` constant in quic-go). This matches go-libp2p, which
+/// sets `NextProtos = ["h3"]` on both its WebTransport listener and dialer, and the
 /// browser WebTransport stack, which negotiates `h3` internally.
 ///
 /// The libp2p identity is **not** authenticated in TLS here; it is authenticated
@@ -279,11 +283,11 @@ impl Config {
 /// The `libp2p` ALPN used by the raw QUIC/TLS transport (`libp2p_tls::P2P_ALPN`) is
 /// therefore deliberately NOT offered for WebTransport.
 ///
-/// NOTE for a future same-port "Mixed" mode (raw QUIC + WebTransport sharing one UDP
-/// port): keep this set disjoint from the QUIC transport's `["libp2p"]` so the
-/// negotiated ALPN can demultiplex the two protocols. Do not add `libp2p` here.
+/// This set must stay disjoint from the QUIC transport's `["libp2p"]`: when both transports
+/// co-listen on one shared endpoint the negotiated ALPN demultiplexes them. Do not add
+/// `libp2p` here.
 pub(crate) fn alpn_protocols() -> Vec<Vec<u8>> {
-    vec![b"h3".to_vec()]
+    vec![WEBTRANSPORT_ALPN.to_vec()]
 }
 
 /// `Clone`-able QUIC transport parameters used to (re)build a [`QuicTransportConfig`].

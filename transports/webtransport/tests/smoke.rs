@@ -18,7 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt, future};
 use libp2p_core::{
@@ -28,6 +28,7 @@ use libp2p_core::{
     transport::{Boxed, DialOpts, ListenerId, PortUse, TransportEvent},
 };
 use libp2p_identity::{Keypair, PeerId};
+use libp2p_quicreuse::SharedQuicEndpoint;
 use libp2p_webtransport as webtransport;
 use time::{OffsetDateTime, ext::NumericalDuration};
 use tracing_subscriber::EnvFilter;
@@ -193,6 +194,48 @@ async fn native_to_native_ping_pong() {
         .expect("ping-pong succeeds");
 
     // Each side authenticated the other's libp2p identity via the Noise handshake.
+    assert_eq!(remote_on_listener, dialer_peer_id);
+    assert_eq!(remote_on_dialer, listener_peer_id);
+}
+
+/// A transport built with `with_shared_endpoint` listens through the externally provided
+/// endpoint holder: the advertised multiaddr carries the holder's UDP port, and a full
+/// dial + Noise handshake + stream echo completes over that shared socket.
+#[tokio::test]
+async fn shared_endpoint_ping_pong() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    let holder = Arc::new(SharedQuicEndpoint::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let holder_port = holder.local_addr().port();
+
+    let keypair = Keypair::generate_ed25519();
+    let listener_peer_id = keypair.public().to_peer_id();
+    let not_before = OffsetDateTime::now_utc().checked_sub(1.days()).unwrap();
+    let cert = webtransport::Certificate::generate(not_before).expect("generate cert");
+    let config = webtransport::Config::new(&keypair, cert);
+    let mut listener = webtransport::Transport::with_shared_endpoint(config, Arc::clone(&holder))
+        .map(|(peer, conn), _| (peer, StreamMuxerBox::new(conn)))
+        .boxed();
+
+    // An explicit port of 0 matches the shared endpoint's bound address.
+    let listen_addr =
+        start_listening(&mut listener, "/ip4/127.0.0.1/udp/0/quic-v1/webtransport").await;
+    assert!(
+        listen_addr
+            .iter()
+            .any(|p| matches!(p, Protocol::Udp(port) if port == holder_port)),
+        "listener must advertise the shared endpoint's port"
+    );
+
+    let (dialer_peer_id, dialer) = create_transport();
+    let dial_addr = listen_addr.with(Protocol::P2p(listener_peer_id));
+
+    let (remote_on_listener, remote_on_dialer) = run_ping_pong(listener, dialer, dial_addr)
+        .await
+        .expect("shared-endpoint ping-pong succeeds");
+
     assert_eq!(remote_on_listener, dialer_peer_id);
     assert_eq!(remote_on_dialer, listener_peer_id);
 }
