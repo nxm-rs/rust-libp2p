@@ -3466,7 +3466,6 @@ dependencies = [
  "libp2p-identity",
  "libp2p-tls",
  "quinn",
- "rustls",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
