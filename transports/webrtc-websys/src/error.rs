@@ -21,6 +21,15 @@ pub enum Error {
 
     #[error("Authentication error")]
     Authentication(#[from] AuthenticationError),
+
+    #[error("Signalling failed: {0}")]
+    Signaling(#[from] libp2p_webrtc_utils::signaling::Error),
+
+    #[error("Failed to open a signalling stream: {0}")]
+    OpenSignalingStream(#[from] libp2p_webrtc_utils::signaling::OpenStreamError),
+
+    #[error("WebRTC handshake timed out")]
+    HandshakeTimeout,
 }
 
 /// New-type wrapper to hide `libp2p_noise` from the public API.
