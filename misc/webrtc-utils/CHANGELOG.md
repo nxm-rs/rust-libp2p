@@ -1,5 +1,9 @@
 ## 0.5.0
 
+- Add a `NetworkBehaviour` to the `signaling` module that runs signalling streams on
+  relayed connections: `Control` opens outbound streams for a dialing WebRTC transport
+  and `IncomingStreams` yields streams opened by remote peers.
+
 - Implement the `/webrtc-signaling/0.0.1` protocol in a new `signaling` module: message
   codec, a stream driver for the offer, answer and trickle-ICE exchange, and a parser
   for `/p2p-circuit/webrtc/p2p/<peer-id>` multiaddrs, shared by the native and browser
