@@ -176,14 +176,22 @@ libp2p-identity = { path = "identity" }
 # control, so the ref can't be force-pushed or deleted out from under us.
 # TODO: drop once a wtransport release contains the header-ordering fix.
 #
-# DRIVER A (WebTransport hole punching): temporarily repointed to a local path checkout of the
-# same fork while we add a client-side "drive the H3/WT handshake over an externally-owned
-# `quinn::Connection`" API (`wtransport::endpoint::connect_over_quic`). This lets WebTransport
-# share the libp2p-quic UDP endpoint and inherit QUIC hole punching. The `quinn` feature exposes
-# both this new client entrypoint and the existing `with_quic_{incoming,connecting}` server hooks.
-# TODO: push the fork API upstream / to the fork repo and pin by rev again.
-wtransport = { path = "/code/nxm/wtransport-fork/wtransport" }
-wtransport-proto = { path = "/code/nxm/wtransport-fork/wtransport-proto" }
+# Pinned to our own fork carrying the header-ordering fix plus the client-side
+# `wtransport::endpoint::connect_over_quic` API (drives the H3/WebTransport handshake over an
+# externally-owned `quinn::Connection`), used together with the existing `with_quic_connecting`
+# server hook so WebTransport rides the shared libp2p-quic `quinn::Endpoint`. Pinned by branch on a
+# repo we control. TODO: upstream the fork APIs to BiagioFesta/wtransport and pin by rev.
+wtransport = { git = "https://github.com/mfw78/wtransport.git", branch = "feat/connect-over-quic" }
+wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", branch = "feat/connect-over-quic" }
+
+# quinn/quinn-proto fork exposing `Incoming::alpn()` / `server_name()` via a best-effort Initial
+# ClientHello peek, so a single shared `quinn::Endpoint` can select a per-ALPN `ServerConfig`
+# (libp2p mutual-auth for `libp2p`, no-client-auth for `h3`/WebTransport) BEFORE the handshake.
+# This is the keystone for single-port QUIC + WebTransport co-listening (epic #20).
+# TODO: upstream `Incoming::alpn()` to quinn-rs/quinn and pin by rev.
+quinn = { git = "https://github.com/mfw78/quinn.git", branch = "feat/incoming-alpn" }
+quinn-proto = { git = "https://github.com/mfw78/quinn.git", branch = "feat/incoming-alpn" }
+quinn-udp = { git = "https://github.com/mfw78/quinn.git", branch = "feat/incoming-alpn" }
 
 [workspace.lints]
 rust.unreachable_pub = "warn"
