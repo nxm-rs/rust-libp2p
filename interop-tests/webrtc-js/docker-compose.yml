@@ -1,0 +1,56 @@
+# rust(relay + /webrtc listener) <-> js(/webrtc dialer) interop harness.
+#
+# Everything lives on one internal bridge network: ICE resolves via container
+# host candidates, so no STUN/TURN and no published host ports. The dial
+# address crosses over via the shared `coord` volume (COORD_FILE), matching
+# the coordination protocol both peers implement.
+#
+# Run via run.sh, or manually with a unique project name:
+#   docker compose -p webrtc-interop -f docker-compose.yml up --exit-code-from js-dialer
+name: webrtc-interop
+
+services:
+  rust-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+    image: webrtc-interop-rust:latest
+    command: ["listener"]
+    environment:
+      MODE: listener
+      # The embedded relay advertises this name; docker DNS resolves it on
+      # the bridge network, so the multiaddr becomes /dns4/rust-listener/...
+      EXTERNAL_IP: rust-listener
+      RELAY_PORT: "4455"
+      COORD_FILE: /coord/dial_addr
+      TEST_TIMEOUT_SECS: "180"
+      RUST_LOG: info,webrtc_p2p_interop=debug,libp2p_webrtc=debug,libp2p_relay=debug
+    volumes:
+      - coord:/coord
+    networks:
+      - interop
+
+  js-dialer:
+    build:
+      context: ../js-webrtc
+    image: webrtc-interop-js:latest
+    command: ["dialer"]
+    environment:
+      MODE: dialer
+      COORD_FILE: /coord/dial_addr
+      TEST_TIMEOUT_SECS: "180"
+      DEBUG: libp2p:webrtc*,libp2p:circuit-relay*,libp2p:websockets*
+    volumes:
+      - coord:/coord
+    networks:
+      - interop
+    depends_on:
+      - rust-listener
+
+volumes:
+  coord: {}
+
+networks:
+  interop:
+    driver: bridge
+    internal: true
