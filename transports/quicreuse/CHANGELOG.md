@@ -27,3 +27,9 @@
   underlying UDP socket so a co-located protocol can send raw datagrams from the shared port
   (as QUIC hole punching does), and `close` shuts the endpoint down for holders that are
   privately owned by a single protocol.
+
+- The routing-hint safety property is now exercised end to end by cross-transport integration
+  tests in `libp2p-webtransport`: `libp2p-quic` and `libp2p-webtransport` co-listen on one
+  shared socket, the demux is asserted deterministic per offered ALPN, and the mutual-auth
+  regression guard proves a client without a valid libp2p certificate is rejected on the
+  `libp2p` route while the `h3` route stays no-client-auth.

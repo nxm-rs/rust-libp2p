@@ -53,17 +53,19 @@ use std::{
     io::{Read as _, Write as _},
     net::TcpStream,
     process::{Child, Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
-use futures::{AsyncReadExt, AsyncWriteExt, future::poll_fn};
+use futures::{AsyncReadExt, AsyncWriteExt, StreamExt, future::poll_fn};
 use libp2p_core::{
     Endpoint, Multiaddr, Transport as _,
     multiaddr::Protocol,
     muxing::{StreamMuxerBox, StreamMuxerExt},
-    transport::{DialOpts, PortUse},
+    transport::{DialOpts, ListenerId, PortUse, TransportEvent},
 };
 use libp2p_identity::Keypair;
+use libp2p_quicreuse::SharedQuicEndpoint;
 use libp2p_webtransport as webtransport;
 use time::{OffsetDateTime, ext::NumericalDuration};
 
@@ -138,6 +140,109 @@ async fn rust_native_dials_go_libp2p() {
             .expect("read echo from go");
         assert_eq!(send, recv, "go echoed the bytes back");
     }
+}
+
+/// Single-port interop smoke: the same dial as [`rust_native_dials_go_libp2p`], but issued from
+/// a node that co-serves plain QUIC and WebTransport on ONE shared UDP socket (a
+/// `SharedQuicEndpoint` with both the `libp2p` and `h3` ALPNs registered).
+///
+/// The single-port model only changes which local endpoint the connection is dialed from and how
+/// inbound connections are routed; the WebTransport handshake bytes on the wire are unchanged
+/// (TLS ClientHello offering the `h3` ALPN, HTTP/3 SETTINGS, extended CONNECT with the draft-02
+/// header, Noise over the first bidirectional stream), so a stock go-libp2p server must accept
+/// the dial exactly as it accepts one from a dedicated socket.
+#[tokio::test]
+#[ignore = "requires the go echo-server binary via the GO_ECHO_SERVER env var"]
+async fn rust_single_port_node_dials_go_libp2p() {
+    let go_bin = env::var("GO_ECHO_SERVER")
+        .expect("set GO_ECHO_SERVER to the path of the compiled go echo-server binary");
+
+    let child = Command::new(&go_bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn go echo-server");
+    let _guard = ChildGuard(child);
+
+    let addr: Multiaddr = fetch_server_addr().await.parse().expect("valid multiaddr");
+    let expected_peer = match addr.iter().last() {
+        Some(Protocol::P2p(peer)) => peer,
+        other => panic!("expected /p2p in go addr, got {other:?}"),
+    };
+
+    // One shared UDP socket serving both protocols.
+    let holder = Arc::new(SharedQuicEndpoint::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let keypair = Keypair::generate_ed25519();
+
+    // Register plain QUIC (`libp2p` ALPN) on the shared socket so the endpoint really is in
+    // mixed, single-port mode while the WebTransport dial goes out.
+    let mut quic_transport = libp2p_quic::tokio::Transport::with_shared_endpoint(
+        libp2p_quic::Config::new(&keypair),
+        Arc::clone(&holder),
+    )
+    .map(|(peer, conn), _| (peer, StreamMuxerBox::new(conn)))
+    .boxed();
+    quic_transport
+        .listen_on(
+            ListenerId::next(),
+            "/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap(),
+        )
+        .unwrap();
+    match quic_transport.select_next_some().await {
+        TransportEvent::NewAddress { .. } => {}
+        e => panic!("unexpected event: {e:?}"),
+    }
+
+    let not_before = OffsetDateTime::now_utc().checked_sub(1.days()).unwrap();
+    let cert = webtransport::Certificate::generate(not_before).unwrap();
+    let mut transport = webtransport::Transport::with_shared_endpoint(
+        webtransport::Config::new(&keypair, cert),
+        Arc::clone(&holder),
+    )
+    .map(|(peer, conn), _| (peer, StreamMuxerBox::new(conn)))
+    .boxed();
+    transport
+        .listen_on(
+            ListenerId::next(),
+            "/ip4/127.0.0.1/udp/0/quic-v1/webtransport".parse().unwrap(),
+        )
+        .unwrap();
+    match transport.select_next_some().await {
+        TransportEvent::NewAddress { .. } => {}
+        e => panic!("unexpected event: {e:?}"),
+    }
+
+    // A reuse dial from the mixed node goes out of the shared listening socket.
+    let (peer, mut conn) = transport
+        .dial(
+            addr,
+            DialOpts {
+                role: Endpoint::Dialer,
+                port_use: PortUse::Reuse,
+            },
+        )
+        .expect("dial")
+        .await
+        .expect("connection to go-libp2p established from the shared socket");
+
+    assert_eq!(
+        peer, expected_peer,
+        "Noise-authenticated peer id matches go server"
+    );
+
+    let mut stream = poll_fn(|cx| conn.poll_outbound_unpin(cx))
+        .await
+        .expect("open outbound stream");
+
+    let payload = [0x5Au8; 1024];
+    let mut echoed = [0u8; 1024];
+    stream.write_all(&payload).await.expect("write to go");
+    stream.flush().await.expect("flush to go");
+    stream
+        .read_exact(&mut echoed)
+        .await
+        .expect("read echo from go");
+    assert_eq!(payload, echoed, "go echoed the bytes back");
 }
 
 /// Fetch the echo-server's multiaddr from its HTTP discovery endpoint on `127.0.0.1:4455`,
