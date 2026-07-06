@@ -22,3 +22,8 @@
   - The accept path is panic-free and applies no backpressure: a full or closed sink drops that
     connection rather than stalling accept for the other protocols.
   - Tokio-only for now, matching the runtimes supported by `libp2p-quic`.
+
+  Additional surface for transports built on the holder: `try_clone_socket` clones the
+  underlying UDP socket so a co-located protocol can send raw datagrams from the shared port
+  (as QUIC hole punching does), and `close` shuts the endpoint down for holders that are
+  privately owned by a single protocol.

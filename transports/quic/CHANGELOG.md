@@ -1,5 +1,12 @@
 ## 0.14.0
 
+- Source `quinn` endpoints from a `libp2p-quicreuse` endpoint holder so QUIC can co-listen on
+  one UDP port with other ALPN-routed protocols. `GenTransport::with_shared_endpoint` accepts an
+  externally shared `SharedQuicEndpoint`, used for listeners and reuse-dials whose address
+  matches it. A transport built with `GenTransport::new` behaves as before through a private
+  single-protocol holder per listener and dialer; dialing, listening, port reuse, hole punching,
+  and the mutual-auth TLS configuration are unchanged.
+
 - Raise MSRV to 1.88.0.
   See [PR 6273](https://github.com/libp2p/rust-libp2p/pull/6273).
 

@@ -70,6 +70,7 @@ use std::net::SocketAddr;
 
 pub use config::Config;
 pub use connection::{Connecting, Connection, Stream};
+pub use libp2p_quicreuse::SharedQuicEndpoint;
 pub use provider::Provider;
 #[cfg(feature = "tokio")]
 pub use provider::tokio;

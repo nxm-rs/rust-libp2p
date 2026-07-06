@@ -88,6 +88,7 @@ impl fmt::Debug for AlpnProtocol {
 /// keep the underlying endpoint driver alive until they close.
 pub struct SharedQuicEndpoint {
     endpoint: quinn::Endpoint,
+    socket: UdpSocket,
     routes: Arc<Mutex<RouteTable>>,
     local_addr: SocketAddr,
     accept_task: tokio::task::JoinHandle<()>,
@@ -107,6 +108,7 @@ impl SharedQuicEndpoint {
     /// Must be called within a tokio runtime. The endpoint starts without any registered ALPN
     /// and does not accept connections until the first [`register`](Self::register) call.
     pub fn new(endpoint_config: quinn::EndpointConfig, socket: UdpSocket) -> Result<Self, Error> {
+        let socket_clone = socket.try_clone()?;
         let endpoint =
             quinn::Endpoint::new(endpoint_config, None, socket, Arc::new(quinn::TokioRuntime))?;
         let local_addr = endpoint.local_addr()?;
@@ -114,6 +116,7 @@ impl SharedQuicEndpoint {
         let accept_task = tokio::spawn(accept_loop(endpoint.clone(), Arc::clone(&routes)));
         Ok(Self {
             endpoint,
+            socket: socket_clone,
             routes,
             local_addr,
             accept_task,
@@ -128,6 +131,22 @@ impl SharedQuicEndpoint {
     /// The local address the underlying socket is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Clones the underlying UDP socket, e.g. to send raw packets alongside QUIC traffic.
+    ///
+    /// The clone shares the file description with the endpoint's socket, so datagrams sent on
+    /// it originate from the shared port.
+    pub fn try_clone_socket(&self) -> std::io::Result<UdpSocket> {
+        self.socket.try_clone()
+    }
+
+    /// Closes all connections on the endpoint immediately and stops accepting new ones.
+    ///
+    /// Intended for a holder owned by a single protocol. On a genuinely shared endpoint prefer
+    /// [`unregister`](Self::unregister), which leaves the other protocols' connections running.
+    pub fn close(&self, error_code: quinn::VarInt, reason: &[u8]) {
+        self.endpoint.close(error_code, reason);
     }
 
     /// Registers a protocol on this endpoint: inbound connections offering `alpn` are accepted
