@@ -3656,6 +3656,7 @@ dependencies = [
  "asynchronous-codec",
  "bytes",
  "futures",
+ "futures_ringbuf",
  "hex",
  "hex-literal 0.4.1",
  "libp2p-core",
@@ -3666,6 +3667,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "sha2",
+ "thiserror 2.0.18",
  "tinytemplate",
  "tracing",
 ]
