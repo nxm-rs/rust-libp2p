@@ -1,0 +1,55 @@
+# Cross-implementation conformance matrix for the private-to-private `/webrtc`
+# transport, modelled on the transport interoperability workflow.
+#
+# The matrix pairs the fork's native and chromium flavours against every
+# implementation in libp2p/test-plans that lists the `webrtc` transport (js-libp2p
+# browser flavours at the time of writing), in both dial directions, plus the
+# same-flavour self pairs. It exercises the wire-level /webrtc-signaling/0.0.1
+# exchange and SDP/ICE compatibility over a Circuit Relay v2 node that the listener
+# side spawns in its own container.
+#
+# The job is manually triggered: it depends on external container images and live
+# ICE negotiation inside the runner, which is too flaky to gate every pull request.
+# See interop-tests/README.md for the runbook and for running the matrix locally.
+name: WebRTC private-to-private interoperability
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-webrtc-interop:
+    name: Run /webrtc cross-implementation tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavour: [chromium, native]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.flavour }} image
+        run: ./scripts/build-interop-image.sh
+        env:
+          AWS_BUCKET_NAME: ${{ vars.S3_LIBP2P_BUILD_CACHE_BUCKET_NAME }}
+          AWS_ACCESS_KEY_ID: ${{ vars.S3_LIBP2P_BUILD_CACHE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_LIBP2P_BUILD_CACHE_AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.S3_LIBP2P_BUILD_CACHE_AWS_REGION }}
+          FLAVOUR: ${{ matrix.flavour }}
+
+      - name: Run ${{ matrix.flavour }} /webrtc tests
+        uses: libp2p/test-plans/.github/actions/run-transport-interop-test@master
+        with:
+          test-filter: ${{ matrix.flavour }}-rust-libp2p-head
+          test-results-suffix: webrtc-${{ matrix.flavour }}
+          extra-versions: ${{ github.workspace }}/interop-tests/${{ matrix.flavour }}-ping-webrtc-version.json
+          s3-cache-bucket: ${{ vars.S3_LIBP2P_BUILD_CACHE_BUCKET_NAME }}
+          s3-access-key-id: ${{ vars.S3_LIBP2P_BUILD_CACHE_AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.S3_LIBP2P_BUILD_CACHE_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.S3_LIBP2P_BUILD_CACHE_AWS_REGION }}
+          worker-count: 4

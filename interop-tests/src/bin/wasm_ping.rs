@@ -10,7 +10,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use interop_tests::{BlpopRequest, Report};
+use interop_tests::{BlpopRequest, Report, RpushRequest};
 use redis::{AsyncCommands, Client};
 use thirtyfour::prelude::*;
 use tokio::{
@@ -24,7 +24,8 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod config;
 
-const BIND_ADDR: &str = "127.0.0.1:8080";
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
+const DEFAULT_CHROMEDRIVER_PORT: &str = "45782";
 
 /// Embedded Wasm package
 ///
@@ -37,6 +38,7 @@ struct WasmPackage;
 struct TestState {
     redis_client: Client,
     config: config::Config,
+    bind_addr: String,
     results_tx: mpsc::Sender<Result<Report, String>>,
 }
 
@@ -49,8 +51,24 @@ async fn main() -> Result<()> {
         .init();
 
     // read env variables
-    let config = config::Config::from_env()?;
+    let mut config = config::Config::from_env()?;
     let test_timeout = Duration::from_secs(config.test_timeout);
+
+    // The browser cannot host the relay a `/webrtc` listener needs, so spawn one in
+    // this wrapper process unless an external relay was provided.
+    if config.transport == "webrtc" && !config.is_dialer && config.relay_addr.is_none() {
+        config.relay_addr = Some(
+            interop_tests::relay_server::spawn(&config.ip)
+                .await?
+                .to_string(),
+        );
+    }
+
+    // The bind address and chromedriver port are configurable so that two instances,
+    // e.g. a `/webrtc` browser listener and browser dialer, can share a host.
+    let bind_addr = std::env::var("bind_addr").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned());
+    let chromedriver_port =
+        std::env::var("chromedriver_port").unwrap_or_else(|_| DEFAULT_CHROMEDRIVER_PORT.to_owned());
 
     // create a redis client
     let redis_client =
@@ -60,6 +78,7 @@ async fn main() -> Result<()> {
     let state = TestState {
         redis_client,
         config,
+        bind_addr: bind_addr.clone(),
         results_tx,
     };
 
@@ -67,6 +86,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         // Redis proxy
         .route("/blpop", post(redis_blpop))
+        .route("/rpush", post(redis_rpush))
         // Report tests status
         .route("/results", post(post_results))
         // Wasm ping test trigger
@@ -79,10 +99,10 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     // Run the service in background
-    tokio::spawn(axum::serve(TcpListener::bind(BIND_ADDR).await?, app).into_future());
+    tokio::spawn(axum::serve(TcpListener::bind(&bind_addr).await?, app).into_future());
 
     // Start executing the test in a browser
-    let (mut chrome, driver) = open_in_browser().await?;
+    let (mut chrome, driver) = open_in_browser(&bind_addr, &chromedriver_port).await?;
 
     // Wait for the outcome to be reported
     let test_result = match tokio::time::timeout(test_timeout, results_rx.recv()).await {
@@ -102,7 +122,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn open_in_browser() -> Result<(Child, WebDriver)> {
+async fn open_in_browser(bind_addr: &str, chromedriver_port: &str) -> Result<(Child, WebDriver)> {
     // start a webdriver process
     // currently only the chromedriver is supported as firefox doesn't
     // have support yet for the certhashes
@@ -112,7 +132,7 @@ async fn open_in_browser() -> Result<(Child, WebDriver)> {
         "chromedriver"
     };
     let mut chrome = tokio::process::Command::new(chromedriver)
-        .arg("--port=45782")
+        .arg(format!("--port={chromedriver_port}"))
         .stdout(Stdio::piped())
         .spawn()?;
     // read driver's stdout
@@ -123,7 +143,7 @@ async fn open_in_browser() -> Result<(Child, WebDriver)> {
     // wait for the 'ready' message
     let mut reader = BufReader::new(driver_out).lines();
     while let Some(line) = reader.next_line().await? {
-        if line.contains("ChromeDriver was started successfully.") {
+        if line.contains("ChromeDriver was started successfully") {
             break;
         }
     }
@@ -133,9 +153,9 @@ async fn open_in_browser() -> Result<(Child, WebDriver)> {
     caps.set_headless()?;
     caps.set_disable_dev_shm_usage()?;
     caps.set_no_sandbox()?;
-    let driver = WebDriver::new("http://localhost:45782", caps).await?;
+    let driver = WebDriver::new(format!("http://localhost:{chromedriver_port}"), caps).await?;
     // go to the wasm test service
-    driver.goto(format!("http://{BIND_ADDR}")).await?;
+    driver.goto(format!("http://{bind_addr}")).await?;
 
     Ok((chrome, driver))
 }
@@ -166,6 +186,27 @@ async fn redis_blpop(
     Ok(Json(res))
 }
 
+/// Redis proxy handler.
+/// `rpush` lets a browser listener publish its advertised multiaddr.
+async fn redis_rpush(
+    state: State<TestState>,
+    request: Json<RpushRequest>,
+) -> Result<(), StatusCode> {
+    let client = state.0.redis_client;
+    let mut conn = client.get_async_connection().await.map_err(|e| {
+        tracing::warn!("Failed to connect to redis: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    conn.rpush::<_, _, ()>(&request.key, &request.value)
+        .await
+        .map_err(|e| {
+            tracing::warn!(key=%request.key, "Failed to push list elem: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(())
+}
+
 /// Receive test results
 async fn post_results(
     state: State<TestState>,
@@ -179,6 +220,7 @@ async fn post_results(
 
 /// Serve the main page which loads our javascript
 async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, StatusCode> {
+    let bind_addr = state.0.bind_addr;
     let config::Config {
         transport,
         ip,
@@ -186,6 +228,7 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
         test_timeout,
         sec_protocol,
         muxer,
+        relay_addr,
         ..
     } = state.0.config;
 
@@ -194,6 +237,9 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
         .unwrap_or("null".to_owned());
     let muxer = muxer
         .map(|p| format!(r#""{p}""#))
+        .unwrap_or("null".to_owned());
+    let relay_addr = relay_addr
+        .map(|a| format!(r#""{a}""#))
         .unwrap_or("null".to_owned());
 
     Ok(Html(format!(
@@ -214,10 +260,11 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
                     "{transport}",
                     "{ip}",
                     {is_dialer},
-                    "{test_timeout}",
-                    "{BIND_ADDR}",
+                    {test_timeout}n,
+                    "{bind_addr}",
                     {sec_protocol},
-                    {muxer}
+                    {muxer},
+                    {relay_addr}
                 )
             </script>
         </head>
