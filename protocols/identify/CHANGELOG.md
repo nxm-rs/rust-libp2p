@@ -1,5 +1,8 @@
 ## 0.48.0
 
+- Use `futures-timer` for stream and future timeouts so handlers run on
+  `wasm32-unknown-unknown`, where the `tokio` timer is unavailable.
+
 - Raise MSRV to 1.88.0.
   See [PR 6273](https://github.com/libp2p/rust-libp2p/pull/6273).
 
