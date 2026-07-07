@@ -229,7 +229,7 @@ async fn spawn_relay(config: &Config) -> Result<Multiaddr> {
 
     // Advertise the container-external address, never loopback: other containers dial
     // `EXTERNAL_IP`, and the relay embeds this address in reservation vouchers.
-    let external = external_ws_addr(&config.external_ip, config.relay_port)?;
+    let external = external_ws_addr(&config.external_ip, config.relay_port);
     swarm.add_external_address(external.clone());
     tracing::info!(external=%external, "Relay advertising external address");
 
@@ -249,15 +249,14 @@ async fn spawn_relay(config: &Config) -> Result<Multiaddr> {
 }
 
 /// `/ip4|ip6|dns4/<external>/tcp/<port>/ws` depending on what `EXTERNAL_IP` holds.
-fn external_ws_addr(external: &str, port: u16) -> Result<Multiaddr> {
+fn external_ws_addr(external: &str, port: u16) -> Multiaddr {
     let base = match external.parse::<IpAddr>() {
         Ok(IpAddr::V4(ip)) => Multiaddr::empty().with(Protocol::Ip4(ip)),
         Ok(IpAddr::V6(ip)) => Multiaddr::empty().with(Protocol::Ip6(ip)),
         Err(_) => Multiaddr::empty().with(Protocol::Dns4(external.into())),
     };
-    Ok(base
-        .with(Protocol::Tcp(port))
-        .with(Protocol::Ws("/".into())))
+    base.with(Protocol::Tcp(port))
+        .with(Protocol::Ws("/".into()))
 }
 
 /// Builds the `/webrtc` client swarm: the relayed hop runs noise + yamux over
@@ -321,9 +320,8 @@ fn build_client(config: &Config) -> Result<Swarm<ClientBehaviour>> {
 /// direct `/webrtc` connection.
 async fn run_dialer(config: &Config) -> Result<Duration> {
     let addr = wait_for_addr(&config.coord_file).await?;
-    let listener_peer_id = match addr.iter().last() {
-        Some(Protocol::P2p(peer_id)) => peer_id,
-        _ => bail!("dial address must end in /p2p/<listener-peer-id>: {addr}"),
+    let Some(Protocol::P2p(listener_peer_id)) = addr.iter().last() else {
+        bail!("dial address must end in /p2p/<listener-peer-id>: {addr}");
     };
 
     let mut swarm = build_client(config)?;
