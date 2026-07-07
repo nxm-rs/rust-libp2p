@@ -19,7 +19,8 @@
     "@libp2p/websockets": "^10.1.15",
     "@multiformats/multiaddr": "^13.0.3",
     "libp2p": "^3.3.4",
-    "node-datachannel": "^0.32.3"
+    "node-datachannel": "^0.32.3",
+    "redis": "^5.12.1"
   },
   "engines": {
     "node": ">=22"

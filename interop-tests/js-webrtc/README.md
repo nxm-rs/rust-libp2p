@@ -23,11 +23,18 @@ is involved.
 | Variable            | Default            | Meaning                                     |
 | ------------------- | ------------------ | ------------------------------------------- |
 | `MODE`              | -                  | `dialer` or `listener` (or first CLI arg)   |
-| `COORD_FILE`        | `/coord/dial_addr` | shared file handing over the dial address   |
+| `REDIS_ADDR`        | unset              | `host:port` redis rendezvous; when set, the listener RPUSHes its address to the `listenerAddr` list and the dialer BLPOPs it (rust harness compatible, used by `nat-browser/`); `redis_addr` works too |
+| `COORD_FILE`        | `/coord/dial_addr` | shared file handing over the dial address (fallback when no redis) |
 | `TEST_TIMEOUT_SECS` | `180`              | overall timeout                             |
 | `ICE_SERVER`        | unset              | optional STUN/TURN url                      |
 | `RELAY_ADDR`        | unset              | relay multiaddr (listener mode only)        |
 | `DEBUG`             | unset              | js-libp2p debug filter, e.g. `libp2p:*`     |
+
+Once ICE completes, the peer logs the nominated candidate pair as
+`ICE_SELECTED_PAIR local=<type> ... remote=<type> ...`; the types
+(host/srflx/relay) tell whether a NAT was hole-punched via STUN or the
+connection fell back to a TURN relay (`nat-browser/scripts/ice-report.sh`
+classifies these lines).
 
 ## Build / smoke
 
