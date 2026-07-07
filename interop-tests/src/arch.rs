@@ -48,6 +48,7 @@ pub(crate) mod native {
         transport: Transport,
         sec_protocol: Option<SecProtocol>,
         muxer: Option<Muxer>,
+        ice_server: Option<String>,
         behaviour_constructor: impl FnOnce(&Keypair, Option<WebrtcBehaviours>) -> B,
     ) -> Result<(Swarm<B>, String)> {
         let (swarm, addr) = match (transport, sec_protocol, muxer) {
@@ -168,7 +169,7 @@ pub(crate) mod native {
                 let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
                 let mut config = webrtc_private::Config::new();
-                if let Ok(url) = std::env::var("ice_server") {
+                if let Some(url) = ice_server {
                     config = config.with_ice_server(url);
                 }
                 let (webrtc_transport, signaling) = webrtc_private::new(config);
@@ -280,6 +281,7 @@ pub(crate) mod wasm {
         transport: Transport,
         sec_protocol: Option<SecProtocol>,
         muxer: Option<Muxer>,
+        ice_server: Option<String>,
         behaviour_constructor: impl FnOnce(&Keypair, Option<WebrtcBehaviours>) -> B,
     ) -> Result<(Swarm<B>, String)> {
         Ok(match (transport, sec_protocol, muxer) {
@@ -346,8 +348,15 @@ pub(crate) mod wasm {
                 let local_peer_id = key.public().to_peer_id();
 
                 let (relay_transport, relay_client) = relay::client::new(local_peer_id);
-                let (webrtc_transport, signaling) =
-                    webrtc_private::new(webrtc_private::Config::new());
+
+                // Browsers cannot read env vars, so the STUN/TURN url arrives as a
+                // parameter, threaded in from the wrapper's `ice_server` env by
+                // `wasm_ping::serve_index_html`.
+                let mut config = webrtc_private::Config::new();
+                if let Some(url) = ice_server {
+                    config = config.with_ice_server(url);
+                }
+                let (webrtc_transport, signaling) = webrtc_private::new(config);
 
                 // The relay is reached over websockets; the signalling stream then runs
                 // on the relayed connection.

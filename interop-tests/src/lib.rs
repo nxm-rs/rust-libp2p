@@ -28,6 +28,7 @@ pub async fn run_test(
     sec_protocol: Option<String>,
     muxer: Option<String>,
     relay_addr: Option<String>,
+    ice_server: Option<String>,
 ) -> Result<Report> {
     init_logger();
 
@@ -52,7 +53,7 @@ pub async fn run_test(
 
     // Build the transport from the passed ENV var.
     let (mut swarm, local_addr) =
-        build_swarm(ip, transport, sec_protocol, muxer, build_behaviour).await?;
+        build_swarm(ip, transport, sec_protocol, muxer, ice_server, build_behaviour).await?;
 
     tracing::info!(local_peer=%swarm.local_peer_id(), "Running ping test");
 
@@ -246,6 +247,7 @@ pub async fn run_test_wasm(
     sec_protocol: Option<String>,
     muxer: Option<String>,
     relay_addr: Option<String>,
+    ice_server: Option<String>,
 ) -> Result<(), JsValue> {
     let result = run_test(
         transport,
@@ -256,6 +258,7 @@ pub async fn run_test_wasm(
         sec_protocol,
         muxer,
         relay_addr,
+        ice_server,
     )
     .await;
     tracing::info!(?result, "Sending test result");

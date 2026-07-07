@@ -32,6 +32,7 @@ async fn native_to_native_webrtc_ping() {
         None,
         None,
         Some(relay_addr.to_string()),
+        None,
     ));
 
     let report = interop_tests::run_test(
@@ -40,6 +41,7 @@ async fn native_to_native_webrtc_ping() {
         true,
         60,
         REDIS_ADDR,
+        None,
         None,
         None,
         None,

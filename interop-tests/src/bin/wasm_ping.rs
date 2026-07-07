@@ -229,6 +229,7 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
         sec_protocol,
         muxer,
         relay_addr,
+        ice_server,
         ..
     } = state.0.config;
 
@@ -240,6 +241,9 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
         .unwrap_or("null".to_owned());
     let relay_addr = relay_addr
         .map(|a| format!(r#""{a}""#))
+        .unwrap_or("null".to_owned());
+    let ice_server = ice_server
+        .map(|u| format!(r#""{u}""#))
         .unwrap_or("null".to_owned());
 
     Ok(Html(format!(
@@ -264,7 +268,8 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
                     "{bind_addr}",
                     {sec_protocol},
                     {muxer},
-                    {relay_addr}
+                    {relay_addr},
+                    {ice_server}
                 )
             </script>
         </head>
