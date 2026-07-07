@@ -161,13 +161,21 @@ fn register_candidate_handler(
         Box::pin(async move {
             let message = match candidate {
                 Some(candidate) => match candidate.to_json() {
-                    Ok(init) => match serde_json::to_string(&init) {
-                        Ok(json) => Some(json),
-                        Err(error) => {
-                            tracing::debug!(%error, "Failed to serialize local ICE candidate");
-                            return;
+                    Ok(mut init) => {
+                        // webrtc-rs fills `sdpMid` with an empty string, which browsers
+                        // reject in `addIceCandidate` (the SDP's mid is "0"). Clear it
+                        // so the remote falls back to `sdpMLineIndex`.
+                        if init.sdp_mid.as_deref() == Some("") {
+                            init.sdp_mid = None;
                         }
-                    },
+                        match serde_json::to_string(&init) {
+                            Ok(json) => Some(json),
+                            Err(error) => {
+                                tracing::debug!(%error, "Failed to serialize local ICE candidate");
+                                return;
+                            }
+                        }
+                    }
                     Err(error) => {
                         tracing::debug!(%error, "Failed to convert local ICE candidate");
                         return;
