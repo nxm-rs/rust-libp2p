@@ -106,6 +106,11 @@ fingerprint handling, and ICE establishment of the direct connection.
   (`ice_server` for native peers; browsers need it passed to the transport
   configuration), and peers behind address-dependent NATs need a permanent relay
   fallback since TURN is not used.
+- The NAT'd variant of all of this lives in `nat-browser/`: a double-MASQUERADE
+  coturn topology plus four ready-made peer images (rust native, rust wasm in
+  Chrome, js on node, js in Chrome) and a `run-pair.sh` harness that asserts a
+  ping over `/webrtc` between any two of them and reports whether the winning
+  ICE pair was srflx or relay.
 
 # Running all interop tests locally with Compose
 
