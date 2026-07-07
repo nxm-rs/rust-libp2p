@@ -1,0 +1,18 @@
+# Slim runtime for the host-built standalone Circuit Relay v2 node.
+#
+# The binary is compiled on the host (see selfcheck.sh) and COPYed in - no dockerized
+# cargo build. trixie-slim rather than bookworm-slim because the host toolchain links
+# against glibc 2.38+ symbols.
+FROM debian:trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY bin/relay /usr/local/bin/natwebrtc-relay
+
+ENV EXTERNAL_IP=172.40.0.11 \
+    RELAY_PORT=4455 \
+    RELAY_SEED=42
+
+ENTRYPOINT ["/usr/local/bin/natwebrtc-relay"]

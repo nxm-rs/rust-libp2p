@@ -1,0 +1,248 @@
+# Double-NAT /webrtc interop topology.
+#
+#                        pub 172.40.0.0/24 ("the internet")
+#        +----------------+--------------+--------------+
+#        |                |              |              |
+#     coturn .10       relay .11      redis .12         |
+#     STUN+TURN        circuit v2     rendezvous        |
+#        |                                              |
+#   nat_a .2 (MASQUERADE)                   nat_b .3 (MASQUERADE)
+#        |                                              |
+#   lan_a 172.41.0.0/24                     lan_b 172.42.0.0/24
+#        |                                              |
+#   peer_a .10 (default route via nat_a)    peer_b .10 (default route via nat_b)
+#
+# Each peer slot is a pair of services: `netns_X` (a tiny alpine container that owns
+# the network namespace, pins the lan IP and replaces the default route so the ONLY
+# egress is the NAT router) and `peer_X` (the actual peer image, joined into that
+# namespace via network_mode, so arbitrary images work without iproute2 or NET_ADMIN).
+#
+# Inject a different peer image per slot via environment interpolation:
+#
+#   PEER_A_IMAGE=my-peer PEER_A_CMD="listener" \
+#   PEER_B_IMAGE=my-peer PEER_B_CMD="dialer" \
+#   docker compose -p natwebrtc-mypair -f docker-compose.nat.yml up
+#
+# Peers never touch `pub` directly: their srflx candidates are the NAT pub addresses
+# (172.40.0.2 / 172.40.0.3) discovered via coturn STUN, and TURN is the fallback.
+#
+# Always tear down with: docker compose -p <project> down -v --remove-orphans
+name: natwebrtc
+
+x-peer-env: &peer-env
+  # Lowercase for the rust interop harness, uppercase for the js peer.
+  ice_server: &ice-server ${ICE_SERVER:-stun:172.40.0.10:3478}
+  ICE_SERVER: *ice-server
+  relay_addr: &relay-addr ${RELAY_ADDR:-/ip4/172.40.0.11/tcp/4455/ws/p2p/12D3KooWBXu3uGPMkjjxViK6autSnFH5QaKJgTwW8CaSxYSD6yYL}
+  RELAY_ADDR: *relay-addr
+  redis_addr: 172.40.0.12:6379
+  transport: webrtc
+  ip: 0.0.0.0
+  test_timeout_seconds: ${TEST_TIMEOUT_SECONDS:-180}
+  TEST_TIMEOUT_SECS: ${TEST_TIMEOUT_SECONDS:-180}
+
+services:
+  # ---------------------------------------------------------------- pub services
+  coturn:
+    image: coturn/coturn:latest
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-ip=172.40.0.10
+      - --relay-ip=172.40.0.10
+      - --external-ip=172.40.0.10
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --realm=natwebrtc.test
+      - --user=webrtc:webrtc
+      - --lt-cred-mech
+      - --fingerprint
+      - --no-tls
+      - --no-dtls
+      - --verbose
+    networks:
+      pub:
+        ipv4_address: 172.40.0.10
+
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    image: natwebrtc-relay:latest
+    environment:
+      EXTERNAL_IP: 172.40.0.11
+      RELAY_PORT: "4455"
+      RELAY_SEED: "42"
+      RUST_LOG: ${RELAY_RUST_LOG:-info,libp2p_relay=debug}
+    networks:
+      pub:
+        ipv4_address: 172.40.0.11
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    networks:
+      pub:
+        ipv4_address: 172.40.0.12
+
+  # ---------------------------------------------------------------- NAT routers
+  nat_a:
+    build:
+      context: .
+      dockerfile: Dockerfile.natrouter
+    image: natwebrtc-natrouter:latest
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    environment:
+      PUB_SUBNET: 172.40.0.0/24
+      LAN_SUBNET: 172.41.0.0/24
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/nat-ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    networks:
+      pub:
+        ipv4_address: 172.40.0.2
+      lan_a:
+        ipv4_address: 172.41.0.2
+
+  nat_b:
+    build:
+      context: .
+      dockerfile: Dockerfile.natrouter
+    image: natwebrtc-natrouter:latest
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    environment:
+      PUB_SUBNET: 172.40.0.0/24
+      LAN_SUBNET: 172.42.0.0/24
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/nat-ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    networks:
+      pub:
+        ipv4_address: 172.40.0.3
+      lan_b:
+        ipv4_address: 172.42.0.2
+
+  # ------------------------------------------------------------------ peer slots
+  # Namespace holders: pin the lan IP, force the default route through the NAT.
+  netns_a:
+    image: alpine:3.20
+    cap_add:
+      - NET_ADMIN
+    command: >-
+      sh -c "ip route replace default via 172.41.0.2
+      && touch /tmp/route-ok && exec sleep 2147483647"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/route-ok"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      nat_a:
+        condition: service_healthy
+    networks:
+      lan_a:
+        ipv4_address: 172.41.0.10
+
+  netns_b:
+    image: alpine:3.20
+    cap_add:
+      - NET_ADMIN
+    command: >-
+      sh -c "ip route replace default via 172.42.0.2
+      && touch /tmp/route-ok && exec sleep 2147483647"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/route-ok"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      nat_b:
+        condition: service_healthy
+    networks:
+      lan_b:
+        ipv4_address: 172.42.0.10
+
+  # The actual peers. Defaults are inert placeholders based on the coturn image, whose
+  # turnutils_stunclient doubles as the STUN probe for selfcheck.sh. The route is
+  # guaranteed to be in place before the peer starts (service_healthy on netns_X).
+  peer_a:
+    image: ${PEER_A_IMAGE:-coturn/coturn:latest}
+    command: ${PEER_A_CMD:-sleep 2147483647}
+    environment:
+      <<: *peer-env
+      is_dialer: ${PEER_A_IS_DIALER:-false}
+      MODE: ${PEER_A_MODE:-listener}
+      RUST_LOG: ${PEER_RUST_LOG:-info,libp2p_webrtc=debug,webrtc_ice=debug}
+      DEBUG: ${PEER_DEBUG:-libp2p:webrtc*,libp2p:circuit-relay*}
+    network_mode: service:netns_a
+    depends_on:
+      netns_a:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      coturn:
+        condition: service_started
+      relay:
+        condition: service_started
+
+  peer_b:
+    image: ${PEER_B_IMAGE:-coturn/coturn:latest}
+    command: ${PEER_B_CMD:-sleep 2147483647}
+    environment:
+      <<: *peer-env
+      is_dialer: ${PEER_B_IS_DIALER:-true}
+      MODE: ${PEER_B_MODE:-dialer}
+      RUST_LOG: ${PEER_RUST_LOG:-info,libp2p_webrtc=debug,webrtc_ice=debug}
+      DEBUG: ${PEER_DEBUG:-libp2p:webrtc*,libp2p:circuit-relay*}
+    network_mode: service:netns_b
+    depends_on:
+      netns_b:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      coturn:
+        condition: service_started
+      relay:
+        condition: service_started
+
+networks:
+  # NOT `internal: true`: docker drops any packet on an internal bridge whose source
+  # or destination lies outside the bridge subnet, which would kill the routed
+  # lan -> NAT -> pub path this topology exists for. Hermeticity comes from routing
+  # instead: the NAT routers delete their default route (see nat-entrypoint.sh), the
+  # peers' only route out is their NAT, and docker's inter-bridge isolation blocks
+  # any direct lan_a <-> lan_b path. The self-check verifies all of it.
+  pub:
+    driver_opts:
+      # Docker 28+ drops any packet addressed to a container ip that does not arrive
+      # on that container's own bridge (anti-direct-access rules in ip raw
+      # PREROUTING), which would kill the routed lan -> NAT -> pub path. Unprotect
+      # the pub network only: coturn/relay/redis and the NAT pub addresses must be
+      # reachable from the lan bridges, while the lan endpoints stay protected.
+      com.docker.network.bridge.gateway_mode_ipv4: nat-unprotected
+    ipam:
+      config:
+        - subnet: 172.40.0.0/24
+  lan_a:
+    ipam:
+      config:
+        - subnet: 172.41.0.0/24
+  lan_b:
+    ipam:
+      config:
+        - subnet: 172.42.0.0/24
