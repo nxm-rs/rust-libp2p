@@ -1,0 +1,196 @@
+# quinn upstream fork-drop watch
+# ==============================================================================
+# We currently vendor a fork of quinn/quinn-proto (see the root `[patch.crates-io]`
+# block) that exposes `Incoming::alpn()` / `Incoming::server_name()` via a
+# best-effort Initial-ClientHello peek. That peek is the keystone of single-port
+# QUIC + WebTransport co-listening: a single shared `quinn::Endpoint` selects a
+# per-ALPN `ServerConfig` (libp2p mutual-auth for `libp2p`, no-client-auth for
+# `h3`/WebTransport) BEFORE the handshake completes.
+#
+# Upstream is replacing that ad-hoc accessor with a first-class "staged acceptor"
+# API (quinn-rs/quinn#2671, with follow-up #2701). Once that lands and ships on
+# crates.io, we should DROP THE FORK. The migration is a single atomic change:
+#
+#   1. Delete the quinn / quinn-proto / quinn-udp entries from the root
+#      `[patch.crates-io]` block in `Cargo.toml` (bump the crates.io quinn to the
+#      release that carries #2671).
+#   2. Rewrite the `transports/quicreuse` accept loop: replace the current
+#      `Incoming::alpn()`-based `ServerConfig` selection with the #2671 staged
+#      acceptor (peek the ALPN off the staged `Incoming`, then `accept_with(...)`
+#      the chosen `ServerConfig`).
+#   3. Regenerate `Cargo.lock`, run `bash scripts/retimer.sh --check`, and confirm
+#      single-port co-listening tests (`transports/webtransport/tests/single_port.rs`)
+#      still pass.
+#
+# Do 1+2 in the SAME commit — an intermediate state where the patch is dropped but
+# the accept loop still calls `Incoming::alpn()` will not compile.
+#
+# This workflow is a low-noise drift guard. On every weekday it probes three
+# independent signals that the fork can be dropped, and FAILS THE JOB ONLY ON A
+# TRANSITION (a signal newly flipping to actionable) so a red run surfaces the
+# event exactly once rather than nagging daily. It never hardcodes secrets: all
+# GitHub calls use the ambient `GITHUB_TOKEN`.
+# ==============================================================================
+
+name: quinn upstream watch
+
+on:
+  schedule:
+    # 07:13 UTC, Monday–Friday. Off the top of the hour to avoid cron congestion.
+    - cron: '13 7 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: quinn-upstream-watch
+  cancel-in-progress: false
+
+env:
+  # The crates.io crate whose minor version we track for the fork-carried bump.
+  WATCH_CRATE: quinn-proto
+  # Committed baseline of the last-seen released quinn-proto version.
+  STATE_FILE: .github/.quinn-watch-state
+  # Symbol the #2671 staged-acceptor API introduces; probed in the released source.
+  STAGED_ACCEPTOR_SYMBOL: accept_with
+  # Optional tracking issue to comment on. Set repo variable QUINN_WATCH_ISSUE to
+  # an issue number to enable comments; left empty, the job still fails on a
+  # transition (the red run is the signal) but posts no comment.
+  TRACKING_ISSUE: ${{ vars.QUINN_WATCH_ISSUE }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  watch:
+    name: probe quinn fork-drop signals
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      # ----------------------------------------------------------------------
+      # Signal 1: upstream PRs merged.
+      # ----------------------------------------------------------------------
+      - name: Probe quinn PRs #2671 and #2701
+        id: prs
+        run: |
+          set -euo pipefail
+          transition=0
+          notes=""
+          for pr in 2671 2701; do
+            merged=$(gh api "repos/quinn-rs/quinn/pulls/${pr}" --jq '.merged' 2>/dev/null || echo "unknown")
+            state=$(gh api "repos/quinn-rs/quinn/pulls/${pr}" --jq '.state' 2>/dev/null || echo "unknown")
+            echo "PR #${pr}: state=${state} merged=${merged}"
+            if [ "${merged}" = "true" ]; then
+              transition=1
+              notes="${notes}- quinn-rs/quinn#${pr} is MERGED.\n"
+            fi
+          done
+          {
+            echo "transition=${transition}"
+            printf 'notes<<EOF\n%b\nEOF\n' "${notes}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------------
+      # Signal 2: crates.io quinn-proto advanced past the committed baseline.
+      # A new MINOR (0.x -> 0.(x+1), or major) is treated as actionable.
+      # ----------------------------------------------------------------------
+      - name: Poll crates.io ${{ env.WATCH_CRATE }} version
+        id: crate
+        run: |
+          set -euo pipefail
+          baseline=$(tr -d '[:space:]' < "${STATE_FILE}")
+          latest=$(curl -fsSL -H 'User-Agent: rust-libp2p-quinn-watch' \
+            "https://crates.io/api/v1/crates/${WATCH_CRATE}" \
+            | jq -r '.crate.max_stable_version')
+          echo "baseline=${baseline} latest=${latest}"
+          minor() { echo "$1" | awk -F. '{printf "%d.%d\n", $1, $2}'; }
+          bl_mm=$(minor "${baseline}")
+          lt_mm=$(minor "${latest}")
+          transition=0
+          notes=""
+          # Lexical/numeric minor comparison: flag when the released minor differs
+          # from (is newer than) the committed baseline minor.
+          higher=$(printf '%s\n%s\n' "${bl_mm}" "${lt_mm}" \
+            | sort -t. -k1,1n -k2,2n | tail -n1)
+          if [ "${lt_mm}" != "${bl_mm}" ] && [ "${higher}" = "${lt_mm}" ]; then
+            transition=1
+            notes="- crates.io ${WATCH_CRATE} advanced ${baseline} -> ${latest} (new minor ${lt_mm}); update ${STATE_FILE} after triage.\n"
+          fi
+          {
+            echo "transition=${transition}"
+            echo "latest=${latest}"
+            printf 'notes<<EOF\n%b\nEOF\n' "${notes}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------------
+      # Signal 3: staged-acceptor symbol present in the released quinn-proto source.
+      # ----------------------------------------------------------------------
+      - name: Probe released source for staged-acceptor API
+        id: symbol
+        run: |
+          set -euo pipefail
+          latest="${{ steps.crate.outputs.latest }}"
+          transition=0
+          notes=""
+          tmp=$(mktemp -d)
+          if curl -fsSL -H 'User-Agent: rust-libp2p-quinn-watch' \
+              "https://static.crates.io/crates/${WATCH_CRATE}/${WATCH_CRATE}-${latest}.crate" \
+              -o "${tmp}/src.crate"; then
+            tar -xzf "${tmp}/src.crate" -C "${tmp}"
+            if grep -rqw "${STAGED_ACCEPTOR_SYMBOL}" "${tmp}/${WATCH_CRATE}-${latest}/src" 2>/dev/null; then
+              transition=1
+              notes="- staged-acceptor symbol \`${STAGED_ACCEPTOR_SYMBOL}\` is present in released ${WATCH_CRATE} ${latest} source.\n"
+            fi
+            echo "symbol '${STAGED_ACCEPTOR_SYMBOL}' present: $([ "${transition}" = 1 ] && echo yes || echo no)"
+          else
+            echo "could not fetch ${WATCH_CRATE} ${latest} source; skipping symbol probe"
+          fi
+          rm -rf "${tmp}"
+          {
+            echo "transition=${transition}"
+            printf 'notes<<EOF\n%b\nEOF\n' "${notes}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------------
+      # Aggregate: comment the tracking issue once per transition, then fail.
+      # ----------------------------------------------------------------------
+      - name: Report and fail on transition
+        env:
+          PRS_T: ${{ steps.prs.outputs.transition }}
+          PRS_NOTES: ${{ steps.prs.outputs.notes }}
+          CRATE_T: ${{ steps.crate.outputs.transition }}
+          CRATE_NOTES: ${{ steps.crate.outputs.notes }}
+          SYMBOL_T: ${{ steps.symbol.outputs.transition }}
+          SYMBOL_NOTES: ${{ steps.symbol.outputs.notes }}
+        run: |
+          set -euo pipefail
+          any=0
+          body="### quinn fork-drop watch: an upstream signal changed\n\n"
+          for t in "${PRS_T}" "${CRATE_T}" "${SYMBOL_T}"; do
+            [ "${t}" = "1" ] && any=1
+          done
+          if [ "${any}" = "0" ]; then
+            echo "No transition. Fork still required. Job green."
+            exit 0
+          fi
+          body="${body}${PRS_NOTES}${CRATE_NOTES}${SYMBOL_NOTES}"
+          body="${body}\nWhen ready, drop the fork atomically: remove the quinn/quinn-proto/quinn-udp"
+          body="${body} \`[patch.crates-io]\` entries AND rewrite the \`transports/quicreuse\`"
+          body="${body} accept loop from \`Incoming::alpn()\` to the #2671 staged acceptor in one commit."
+          body="${body} See \`.github/workflows/quinn-watch.yml\` for the full migration checklist."
+          printf '%b\n' "${body}"
+
+          marker="<!-- quinn-watch:${GITHUB_RUN_ID} -->"
+          if [ -n "${TRACKING_ISSUE:-}" ]; then
+            gh issue comment "${TRACKING_ISSUE}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body "$(printf '%b\n\n%s\n' "${body}" "${marker}")"
+            echo "Commented tracking issue #${TRACKING_ISSUE}."
+          else
+            echo "::notice::Set repo variable QUINN_WATCH_ISSUE to auto-comment a tracking issue."
+          fi
+
+          echo "::error::quinn fork-drop signal changed — see job log / tracking issue."
+          exit 1
