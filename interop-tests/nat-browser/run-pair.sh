@@ -102,6 +102,10 @@ if wait_out="$(timeout "$((TIMEOUT + 60))" docker wait "$dialer_cid" 2>/dev/null
     rc="$wait_out"
 fi
 
+# Give a browser listener a moment to report its selected ICE pair (the shim polls
+# getStats once a second and posts the result asynchronously).
+sleep 5
+
 # Capture logs before teardown so the assertions below can read them.
 dialer_log="$LOG_DIR/peer_b.log"
 listener_log="$LOG_DIR/peer_a.log"

@@ -259,9 +259,32 @@ const ICE_SHIM_JS: &str = r#"
         return true;
     }
 
+    function trace(line) {
+        console.log(line);
+        try {
+            fetch("/ice", {
+                method: "POST",
+                headers: { "content-type": "text/plain" },
+                body: line,
+            });
+        } catch (_) {}
+    }
+
     window.RTCPeerConnection = class extends Native {
         constructor(...args) {
             super(...args);
+            this.addEventListener("icecandidate", (e) => {
+                trace(`ICE_TRACE local candidate: ${e.candidate ? e.candidate.candidate : "(end)"}`);
+            });
+            this.addEventListener("icecandidateerror", (e) => {
+                trace(`ICE_TRACE candidate error: code=${e.errorCode} text=${e.errorText}`);
+            });
+            this.addEventListener("iceconnectionstatechange", () => {
+                trace(`ICE_TRACE ice connection state: ${this.iceConnectionState}`);
+            });
+            this.addEventListener("connectionstatechange", () => {
+                trace(`ICE_TRACE connection state: ${this.connectionState}`);
+            });
             const poll = setInterval(async () => {
                 const state = this.connectionState;
                 if (state === "closed" || state === "failed") {
@@ -273,6 +296,20 @@ const ICE_SHIM_JS: &str = r#"
                     clearInterval(poll);
                 }
             }, 1000);
+        }
+
+        addIceCandidate(...args) {
+            const desc = args.length ? JSON.stringify(args[0]) : "(implicit end)";
+            return super.addIceCandidate(...args).then(
+                (v) => {
+                    trace(`ICE_TRACE addIceCandidate ok: ${desc}`);
+                    return v;
+                },
+                (e) => {
+                    trace(`ICE_TRACE addIceCandidate FAILED (${e && e.message}): ${desc}`);
+                    throw e;
+                },
+            );
         }
     };
 })();
