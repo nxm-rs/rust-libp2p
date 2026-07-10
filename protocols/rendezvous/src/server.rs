@@ -438,7 +438,7 @@ impl Registrations {
         self.registrations
             .insert(registration_id, registration.clone());
 
-        let next_expiry = futures_timer::Delay::new(Duration::from_secs(ttl))
+        let next_expiry = libp2p_timer::Delay::new(Duration::from_secs(ttl))
             .map(move |_| registration_id)
             .boxed();
 

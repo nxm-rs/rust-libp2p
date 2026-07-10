@@ -31,7 +31,6 @@ use std::{
 };
 
 use futures::FutureExt;
-use futures_timer::Delay;
 use hashlink::LinkedHashMap;
 use libp2p_core::{
     Endpoint, Multiaddr,
@@ -45,6 +44,7 @@ use libp2p_swarm::{
     behaviour::{AddressChange, ConnectionClosed, ConnectionEstablished, FromSwarm},
     dial_opts::DialOpts,
 };
+use libp2p_timer::Delay;
 #[cfg(feature = "metrics")]
 use prometheus_client::registry::Registry;
 use prost::Message as _;

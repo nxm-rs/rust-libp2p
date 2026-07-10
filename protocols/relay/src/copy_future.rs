@@ -36,7 +36,7 @@ use futures::{
     io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader},
     ready,
 };
-use futures_timer::Delay;
+use libp2p_timer::Delay;
 
 pub(crate) struct CopyFuture<S, D> {
     src: BufReader<S>,

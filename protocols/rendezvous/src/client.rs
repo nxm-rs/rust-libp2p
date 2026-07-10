@@ -420,7 +420,7 @@ impl Behaviour {
                     self.expiring_registrations.push(
                         async move {
                             // if the timer errors we consider it expired
-                            futures_timer::Delay::new(Duration::from_secs(ttl)).await;
+                            libp2p_timer::Delay::new(Duration::from_secs(ttl)).await;
                             (peer_id, namespace)
                         }
                         .boxed(),

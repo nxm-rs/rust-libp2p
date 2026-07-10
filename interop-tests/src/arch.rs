@@ -202,7 +202,7 @@ pub(crate) mod wasm {
     }
 
     pub(crate) fn sleep(duration: Duration) -> BoxFuture<'static, ()> {
-        futures_timer::Delay::new(duration).boxed()
+        libp2p_timer::Delay::new(duration).boxed()
     }
 
     pub(crate) async fn build_swarm<B: NetworkBehaviour>(

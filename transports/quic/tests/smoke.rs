@@ -17,7 +17,6 @@ use futures::{
     future::{BoxFuture, Either, poll_fn},
     stream::StreamExt,
 };
-use futures_timer::Delay;
 use libp2p_core::{
     Endpoint, Multiaddr, Transport,
     multiaddr::Protocol,
@@ -31,6 +30,7 @@ use libp2p_identity::PeerId;
 use libp2p_noise as noise;
 use libp2p_quic as quic;
 use libp2p_tcp as tcp;
+use libp2p_timer::Delay;
 use libp2p_yamux as yamux;
 use quic::Provider;
 use rand::RngCore;
@@ -416,7 +416,7 @@ async fn write_after_peer_dropped_stream() {
         .try_init();
     let (stream_a, mut stream_b) = build_streams::<quic::tokio::Provider>().await;
     drop(stream_a);
-    futures_timer::Delay::new(Duration::from_millis(100)).await;
+    libp2p_timer::Delay::new(Duration::from_millis(100)).await;
 
     let data = vec![0; 10];
     stream_b.write_all(&data).await.expect("Write failed.");

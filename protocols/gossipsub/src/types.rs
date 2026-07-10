@@ -24,10 +24,10 @@ use std::{
     fmt::{self, Debug},
 };
 
-use futures_timer::Delay;
 use hashlink::LinkedHashMap;
 use libp2p_identity::PeerId;
 use libp2p_swarm::ConnectionId;
+use libp2p_timer::Delay;
 use prost::Message as _;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};

@@ -22,9 +22,9 @@ use std::io;
 
 use asynchronous_codec::Framed;
 use futures::prelude::*;
-use futures_timer::Delay;
 use libp2p_core::{Multiaddr, multiaddr::Protocol};
 use libp2p_swarm::Stream;
+use libp2p_timer::Delay;
 use thiserror::Error;
 use web_time::Instant;
 

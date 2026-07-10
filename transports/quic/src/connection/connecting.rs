@@ -30,8 +30,8 @@ use futures::{
     future::{Either, FutureExt, Select, select},
     prelude::*,
 };
-use futures_timer::Delay;
 use libp2p_identity::PeerId;
+use libp2p_timer::Delay;
 use quinn::rustls::pki_types::CertificateDer;
 
 use crate::{Connection, ConnectionError, Error};

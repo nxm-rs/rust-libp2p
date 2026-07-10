@@ -49,7 +49,7 @@ impl Handler {
     pub fn new() -> Self {
         Self {
             inbound: futures_bounded::FuturesSet::new(
-                move || futures_bounded::Delay::futures_timer(crate::RUN_TIMEOUT),
+                move || libp2p_timer::bounded_delay(crate::RUN_TIMEOUT),
                 crate::MAX_PARALLEL_RUNS_PER_CONNECTION,
             ),
         }
