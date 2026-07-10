@@ -48,6 +48,7 @@ use libp2p_core::{
     upgrade::{NegotiationError, ProtocolError},
 };
 use libp2p_identity::PeerId;
+use libp2p_timer::Delay;
 pub use supported_protocols::SupportedProtocols;
 use web_time::Instant;
 
@@ -59,7 +60,6 @@ use crate::{
         ProtocolsChange, UpgradeInfoSend,
     },
     stream::ActiveStreamCounter,
-    timer::Delay,
     upgrade::{InboundUpgradeSend, OutboundUpgradeSend},
 };
 
