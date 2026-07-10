@@ -1,0 +1,162 @@
+name: WebTransport interop
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2 # Fail cache download after 2 minutes.
+  RUSTFLAGS: '-Dwarnings' # Never tolerate warnings.
+  # Pin the go toolchain to the one declared by the harness modules so a newer
+  # `go` directive in go.mod can't trigger an implicit toolchain download.
+  GOTOOLCHAIN: local
+
+jobs:
+  # rust-native <-> rust-native.
+  # Exercised by the in-crate `smoke.rs` integration test under a plain
+  # `cargo test`. No external peer required.
+  native-to-native:
+    name: rust-native <-> rust-native
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r7kamura/rust-problem-matchers@9fe7ca9f6550e5d6358e179d451cc25ea6b54f98 #v1.5.0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          shared-key: stable-cache
+          save-if: false
+
+      - name: Run native ping-pong test
+        run: cargo test -p libp2p-webtransport --test smoke
+
+  # rust-native -> go-libp2p.
+  # Builds the go-libp2p echo-server and runs the (ignored) `interop_go` test,
+  # which spawns the binary and dials it from a native rust node.
+  native-to-go:
+    name: rust-native -> go-libp2p
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r7kamura/rust-problem-matchers@9fe7ca9f6550e5d6358e179d451cc25ea6b54f98 #v1.5.0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          shared-key: stable-cache
+          save-if: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wasm-tests/webtransport-tests/echo-server/go.mod
+          cache-dependency-path: wasm-tests/webtransport-tests/echo-server/go.sum
+
+      - name: Build the go-libp2p echo-server
+        working-directory: wasm-tests/webtransport-tests/echo-server
+        run: go build -o echo-server .
+
+      - name: Dial go-libp2p from a native rust node
+        env:
+          GO_ECHO_SERVER: ${{ github.workspace }}/wasm-tests/webtransport-tests/echo-server/echo-server
+        run: cargo test -p libp2p-webtransport --test interop_go -- --ignored --nocapture
+
+  # go-libp2p -> rust-native.
+  # Runs the native rust echo_server example in the background (serving its
+  # multiaddr on 127.0.0.1:4455) and dials it with the committed go-libp2p
+  # `wt-client` harness.
+  go-to-native:
+    name: go-libp2p -> rust-native
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: r7kamura/rust-problem-matchers@9fe7ca9f6550e5d6358e179d451cc25ea6b54f98 #v1.5.0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          shared-key: stable-cache
+          save-if: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wasm-tests/webtransport-tests/wt-client/go.mod
+          cache-dependency-path: wasm-tests/webtransport-tests/wt-client/go.sum
+
+      - name: Dial the native rust server from go-libp2p
+        run: ./wasm-tests/webtransport-tests/run-go-to-native.sh
+
+  # browser -> rust-native.
+  # Runs the native rust echo_server example in the background and points the
+  # wasm-bindgen browser test suite (libp2p-webtransport-websys) at it.
+  browser-to-native:
+    name: browser -> rust-native
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          shared-key: stable-cache
+          save-if: false
+
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: wasm-pack@0.12.0
+
+      - name: Install chromedriver
+        uses: nanasess/setup-chromedriver@v2
+
+      - name: Run browser tests against the native rust server
+        working-directory: wasm-tests/webtransport-tests
+        run: ./run-native.sh
+
+  # browser -> go-libp2p.
+  # The pre-existing flow: build the go-libp2p echo-server and run the wasm
+  # browser test suite against it. Uses the docker-based run.sh harness.
+  browser-to-go:
+    name: browser -> go-libp2p
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          shared-key: stable-cache
+          save-if: false
+
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: wasm-pack@0.12.0
+
+      - name: Install chromedriver
+        uses: nanasess/setup-chromedriver@v2
+
+      - name: Run browser tests against the go-libp2p server
+        run: ./wasm-tests/webtransport-tests/run.sh
