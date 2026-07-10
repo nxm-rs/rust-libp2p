@@ -1,0 +1,29 @@
+{
+  "name": "webrtc-p2p-interop-js-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "js-libp2p private-to-private /webrtc interop peer running in stock Chrome, driven by playwright-core",
+  "type": "module",
+  "scripts": {
+    "bundle": "esbuild src/page.js --bundle --format=esm --platform=browser --outfile=dist/bundle.js && cp src/index.html src/shim.js dist/"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-noise": "^17.0.0",
+    "@chainsafe/libp2p-yamux": "^8.0.1",
+    "@libp2p/circuit-relay-v2": "^4.2.7",
+    "@libp2p/identify": "^4.1.8",
+    "@libp2p/ping": "^3.1.7",
+    "@libp2p/webrtc": "^6.0.25",
+    "@libp2p/websockets": "^10.1.15",
+    "@multiformats/multiaddr": "^13.0.3",
+    "libp2p": "^3.3.4",
+    "playwright-core": "^1.50.0",
+    "redis": "^5.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

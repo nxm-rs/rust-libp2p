@@ -179,6 +179,15 @@ pub(crate) struct RtcPeerConnection {
 
 impl RtcPeerConnection {
     pub(crate) async fn new(algorithm: String) -> Result<Self, Error> {
+        Self::new_with_ice_servers(algorithm, &[]).await
+    }
+
+    /// Like [`RtcPeerConnection::new`], additionally configuring ICE server urls,
+    /// e.g. `stun:stun.example.net:3478`.
+    pub(crate) async fn new_with_ice_servers(
+        algorithm: String,
+        ice_servers: &[String],
+    ) -> Result<Self, Error> {
         let algo: Object = Object::new();
         Reflect::set(&algo, &"name".into(), &"ECDSA".into()).unwrap();
         Reflect::set(&algo, &"namedCurve".into(), &"P-256".into()).unwrap();
@@ -196,9 +205,28 @@ impl RtcPeerConnection {
         certificate_arr.push(&certificate);
         config.set_certificates(&certificate_arr);
 
+        if !ice_servers.is_empty() {
+            let urls = js_sys::Array::new();
+            for url in ice_servers {
+                urls.push(&JsValue::from_str(url));
+            }
+
+            let server = web_sys::RtcIceServer::new();
+            server.set_urls(&urls);
+
+            let servers = js_sys::Array::new();
+            servers.push(&server);
+            config.set_ice_servers(&servers);
+        }
+
         let inner = web_sys::RtcPeerConnection::new_with_configuration(&config)?;
 
         Ok(Self { inner })
+    }
+
+    /// The browser's underlying connection object.
+    pub(crate) fn inner(&self) -> &web_sys::RtcPeerConnection {
+        &self.inner
     }
 
     /// Creates the stream for the initial noise handshake.
@@ -241,6 +269,17 @@ impl RtcPeerConnection {
             .expect("sdp string should be valid string");
 
         Ok(offer)
+    }
+
+    pub(crate) async fn create_answer(&self) -> Result<String, Error> {
+        let answer = JsFuture::from(self.inner.create_answer()).await?;
+
+        let answer = Reflect::get(&answer, &JsValue::from_str("sdp"))
+            .expect("sdp should be valid")
+            .as_string()
+            .expect("sdp string should be valid string");
+
+        Ok(answer)
     }
 
     pub(crate) async fn set_local_description(

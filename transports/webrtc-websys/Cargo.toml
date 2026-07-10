@@ -14,6 +14,7 @@ publish = true
 [dependencies]
 bytes.workspace = true
 futures = { workspace = true }
+libp2p-timer = { workspace = true }
 hex = "0.4.3"
 js-sys = { version = "0.3" }
 libp2p-core = { workspace = true }
@@ -24,10 +25,20 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 wasm-bindgen = { version = "0.2.90" }
 wasm-bindgen-futures = { workspace = true}
-web-sys = { version = "0.3.70", features = ["Document", "Location", "MessageEvent", "Navigator", "RtcCertificate", "RtcConfiguration", "RtcDataChannel", "RtcDataChannelEvent", "RtcDataChannelInit", "RtcDataChannelState", "RtcDataChannelType", "RtcPeerConnection", "RtcSdpType", "RtcSessionDescription", "RtcSessionDescriptionInit", "Window"] }
+web-sys = { version = "0.3.70", features = ["Document", "Location", "MessageEvent", "Navigator", "RtcCertificate", "RtcConfiguration", "RtcDataChannel", "RtcDataChannelEvent", "RtcDataChannelInit", "RtcDataChannelState", "RtcDataChannelType", "RtcIceCandidate", "RtcIceCandidateInit", "RtcIceServer", "RtcPeerConnection", "RtcPeerConnectionIceEvent", "RtcSdpType", "RtcSessionDescription", "RtcSessionDescriptionInit", "Window"] }
 
 [target.'cfg(target_family="wasm")'.dependencies]
 getrandom = { workspace = true}
+
+[target.'cfg(target_family="wasm")'.dev-dependencies]
+libp2p-identity = { workspace = true, features = ["ed25519", "rand"] }
+libp2p-noise = { workspace = true }
+libp2p-ping = { workspace = true }
+libp2p-relay = { workspace = true }
+libp2p-swarm = { workspace = true, features = ["macros"] }
+libp2p-websocket-websys = { workspace = true }
+libp2p-yamux = { workspace = true }
+wasm-bindgen-test = "0.3.50"
 
 [lints]
 workspace = true

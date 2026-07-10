@@ -22,6 +22,7 @@ pub mod certificate;
 mod connection;
 mod error;
 mod fingerprint;
+pub mod private;
 mod req_res_chan;
 mod sdp;
 mod stream;

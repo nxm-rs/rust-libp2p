@@ -2,6 +2,7 @@
 
 mod connection;
 mod error;
+pub mod private;
 mod sdp;
 mod stream;
 mod transport;

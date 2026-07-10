@@ -23,6 +23,7 @@ libp2p-webrtc-utils = { workspace = true }
 multihash = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
+serde_json = "1.0"
 stun = "0.17.0"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net"], optional = true }
@@ -36,6 +37,13 @@ pem = ["webrtc?/pem"]
 
 [dev-dependencies]
 libp2p-identity = { workspace = true, features = ["rand"] }
+libp2p-ping = { workspace = true }
+libp2p-plaintext = { workspace = true }
+libp2p-relay = { workspace = true }
+libp2p-swarm = { workspace = true, features = ["macros", "tokio"] }
+libp2p-swarm-test = { workspace = true }
+libp2p-tcp = { workspace = true, features = ["tokio"] }
+libp2p-yamux = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 quickcheck = "1.1.0"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
@@ -43,6 +51,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[test]]
 name = "smoke"
+required-features = ["tokio"]
+
+[[test]]
+name = "private"
 required-features = ["tokio"]
 
 [lints]

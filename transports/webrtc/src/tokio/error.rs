@@ -38,6 +38,20 @@ pub enum Error {
     #[error("no active listeners, can not dial without a previous listen")]
     NoListeners,
 
+    #[error("signalling failed: {0}")]
+    Signaling(#[from] libp2p_webrtc_utils::signaling::Error),
+
+    #[error("failed to open a signalling stream: {0}")]
+    OpenSignalingStream(#[from] libp2p_webrtc_utils::signaling::OpenStreamError),
+
+    #[error("WebRTC handshake timed out")]
+    HandshakeTimeout,
+
+    #[error(
+        "hole punching is not supported over webrtc-direct, dial a relayed webrtc multiaddr instead"
+    )]
+    UnsupportedHolePunch,
+
     #[error("UDP mux error: {0}")]
     UDPMux(std::io::Error),
 

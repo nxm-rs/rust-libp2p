@@ -10,7 +10,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use interop_tests::{BlpopRequest, Report};
+use interop_tests::{BlpopRequest, Report, RpushRequest};
 use redis::{AsyncCommands, Client};
 use thirtyfour::prelude::*;
 use tokio::{
@@ -24,7 +24,8 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod config;
 
-const BIND_ADDR: &str = "127.0.0.1:8080";
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
+const DEFAULT_CHROMEDRIVER_PORT: &str = "45782";
 
 /// Embedded Wasm package
 ///
@@ -37,6 +38,7 @@ struct WasmPackage;
 struct TestState {
     redis_client: Client,
     config: config::Config,
+    bind_addr: String,
     results_tx: mpsc::Sender<Result<Report, String>>,
 }
 
@@ -49,8 +51,24 @@ async fn main() -> Result<()> {
         .init();
 
     // read env variables
-    let config = config::Config::from_env()?;
+    let mut config = config::Config::from_env()?;
     let test_timeout = Duration::from_secs(config.test_timeout);
+
+    // The browser cannot host the relay a `/webrtc` listener needs, so spawn one in
+    // this wrapper process unless an external relay was provided.
+    if config.transport == "webrtc" && !config.is_dialer && config.relay_addr.is_none() {
+        config.relay_addr = Some(
+            interop_tests::relay_server::spawn(&config.ip)
+                .await?
+                .to_string(),
+        );
+    }
+
+    // The bind address and chromedriver port are configurable so that two instances,
+    // e.g. a `/webrtc` browser listener and browser dialer, can share a host.
+    let bind_addr = std::env::var("bind_addr").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned());
+    let chromedriver_port =
+        std::env::var("chromedriver_port").unwrap_or_else(|_| DEFAULT_CHROMEDRIVER_PORT.to_owned());
 
     // create a redis client
     let redis_client =
@@ -60,6 +78,7 @@ async fn main() -> Result<()> {
     let state = TestState {
         redis_client,
         config,
+        bind_addr: bind_addr.clone(),
         results_tx,
     };
 
@@ -67,10 +86,16 @@ async fn main() -> Result<()> {
     let app = Router::new()
         // Redis proxy
         .route("/blpop", post(redis_blpop))
+        .route("/rpush", post(redis_rpush))
         // Report tests status
         .route("/results", post(post_results))
+        // Relay ICE diagnostics (e.g. the selected candidate pair) from the browser
+        // to this wrapper's stdout, where the NAT harness log capture finds them.
+        .route("/ice", post(post_ice))
         // Wasm ping test trigger
         .route("/", get(serve_index_html))
+        // RTCPeerConnection wrapper reporting the selected ICE candidate pair
+        .route("/ice-shim.js", get(serve_ice_shim))
         // Wasm app static files
         .fallback(serve_wasm_pkg)
         // Middleware
@@ -79,10 +104,10 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     // Run the service in background
-    tokio::spawn(axum::serve(TcpListener::bind(BIND_ADDR).await?, app).into_future());
+    tokio::spawn(axum::serve(TcpListener::bind(&bind_addr).await?, app).into_future());
 
     // Start executing the test in a browser
-    let (mut chrome, driver) = open_in_browser().await?;
+    let (mut chrome, driver) = open_in_browser(&bind_addr, &chromedriver_port).await?;
 
     // Wait for the outcome to be reported
     let test_result = match tokio::time::timeout(test_timeout, results_rx.recv()).await {
@@ -102,7 +127,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn open_in_browser() -> Result<(Child, WebDriver)> {
+async fn open_in_browser(bind_addr: &str, chromedriver_port: &str) -> Result<(Child, WebDriver)> {
     // start a webdriver process
     // currently only the chromedriver is supported as firefox doesn't
     // have support yet for the certhashes
@@ -112,7 +137,7 @@ async fn open_in_browser() -> Result<(Child, WebDriver)> {
         "chromedriver"
     };
     let mut chrome = tokio::process::Command::new(chromedriver)
-        .arg("--port=45782")
+        .arg(format!("--port={chromedriver_port}"))
         .stdout(Stdio::piped())
         .spawn()?;
     // read driver's stdout
@@ -123,7 +148,7 @@ async fn open_in_browser() -> Result<(Child, WebDriver)> {
     // wait for the 'ready' message
     let mut reader = BufReader::new(driver_out).lines();
     while let Some(line) = reader.next_line().await? {
-        if line.contains("ChromeDriver was started successfully.") {
+        if line.contains("ChromeDriver was started successfully") {
             break;
         }
     }
@@ -133,9 +158,9 @@ async fn open_in_browser() -> Result<(Child, WebDriver)> {
     caps.set_headless()?;
     caps.set_disable_dev_shm_usage()?;
     caps.set_no_sandbox()?;
-    let driver = WebDriver::new("http://localhost:45782", caps).await?;
+    let driver = WebDriver::new(format!("http://localhost:{chromedriver_port}"), caps).await?;
     // go to the wasm test service
-    driver.goto(format!("http://{BIND_ADDR}")).await?;
+    driver.goto(format!("http://{bind_addr}")).await?;
 
     Ok((chrome, driver))
 }
@@ -166,6 +191,141 @@ async fn redis_blpop(
     Ok(Json(res))
 }
 
+/// Redis proxy handler.
+/// `rpush` lets a browser listener publish its advertised multiaddr.
+async fn redis_rpush(
+    state: State<TestState>,
+    request: Json<RpushRequest>,
+) -> Result<(), StatusCode> {
+    let client = state.0.redis_client;
+    let mut conn = client.get_async_connection().await.map_err(|e| {
+        tracing::warn!("Failed to connect to redis: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    conn.rpush::<_, _, ()>(&request.key, &request.value)
+        .await
+        .map_err(|e| {
+            tracing::warn!(key=%request.key, "Failed to push list elem: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(())
+}
+
+/// A pre-wasm shim that wraps `window.RTCPeerConnection` (web-sys resolves the
+/// constructor through the global at call time) and, once a connection reaches the
+/// `connected` state, reads the nominated candidate pair from `getStats()` and
+/// reports it: to the console, and to this wrapper's `/ice` endpoint so it lands in
+/// the container log. The candidate types (host/srflx/relay) tell whether the
+/// double-NAT was hole-punched via STUN or fell back to a TURN relay.
+const ICE_SHIM_JS: &str = r#"
+(() => {
+    const Native = window.RTCPeerConnection;
+    if (!Native) { return; }
+
+    async function report(pc) {
+        const stats = await pc.getStats();
+        const byId = new Map();
+        stats.forEach((s) => byId.set(s.id, s));
+        let pair = null;
+        stats.forEach((s) => {
+            if (s.type === "transport" && s.selectedCandidatePairId) {
+                pair = byId.get(s.selectedCandidatePairId) ?? pair;
+            }
+        });
+        if (!pair) {
+            stats.forEach((s) => {
+                if (!pair && s.type === "candidate-pair"
+                    && s.state === "succeeded" && (s.nominated || s.selected)) {
+                    pair = s;
+                }
+            });
+        }
+        if (!pair) { return false; }
+        const local = byId.get(pair.localCandidateId) ?? {};
+        const remote = byId.get(pair.remoteCandidateId) ?? {};
+        const fmt = (c) =>
+            `${c.candidateType ?? "?"} ${c.ip ?? c.address ?? "?"}:${c.port ?? "?"}`;
+        const line = `ICE_SELECTED_PAIR local=${fmt(local)} remote=${fmt(remote)}`
+            + " (selected candidate pair)";
+        console.log(line);
+        try {
+            await fetch("/ice", {
+                method: "POST",
+                headers: { "content-type": "text/plain" },
+                body: line,
+            });
+        } catch (_) {}
+        return true;
+    }
+
+    function trace(line) {
+        console.log(line);
+        try {
+            fetch("/ice", {
+                method: "POST",
+                headers: { "content-type": "text/plain" },
+                body: line,
+            });
+        } catch (_) {}
+    }
+
+    window.RTCPeerConnection = class extends Native {
+        constructor(...args) {
+            super(...args);
+            this.addEventListener("icecandidate", (e) => {
+                trace(`ICE_TRACE local candidate: ${e.candidate ? e.candidate.candidate : "(end)"}`);
+            });
+            this.addEventListener("icecandidateerror", (e) => {
+                trace(`ICE_TRACE candidate error: code=${e.errorCode} text=${e.errorText}`);
+            });
+            this.addEventListener("iceconnectionstatechange", () => {
+                trace(`ICE_TRACE ice connection state: ${this.iceConnectionState}`);
+            });
+            this.addEventListener("connectionstatechange", () => {
+                trace(`ICE_TRACE connection state: ${this.connectionState}`);
+            });
+            const poll = setInterval(async () => {
+                const state = this.connectionState;
+                if (state === "closed" || state === "failed") {
+                    clearInterval(poll);
+                    return;
+                }
+                if ((state === "connected" || this.iceConnectionState === "connected")
+                    && await report(this).catch(() => false)) {
+                    clearInterval(poll);
+                }
+            }, 1000);
+        }
+
+        addIceCandidate(...args) {
+            const desc = args.length ? JSON.stringify(args[0]) : "(implicit end)";
+            return super.addIceCandidate(...args).then(
+                (v) => {
+                    trace(`ICE_TRACE addIceCandidate ok: ${desc}`);
+                    return v;
+                },
+                (e) => {
+                    trace(`ICE_TRACE addIceCandidate FAILED (${e && e.message}): ${desc}`);
+                    throw e;
+                },
+            );
+        }
+    };
+})();
+"#;
+
+async fn serve_ice_shim() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript")], ICE_SHIM_JS)
+}
+
+/// Receive ICE diagnostics from the browser page and print them, so that
+/// "which candidate pair won: srflx or relay?" can be answered from the
+/// container log of this wrapper (see nat-browser/scripts/ice-report.sh).
+async fn post_ice(body: String) {
+    println!("{body}");
+}
+
 /// Receive test results
 async fn post_results(
     state: State<TestState>,
@@ -179,6 +339,7 @@ async fn post_results(
 
 /// Serve the main page which loads our javascript
 async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, StatusCode> {
+    let bind_addr = state.0.bind_addr;
     let config::Config {
         transport,
         ip,
@@ -186,6 +347,8 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
         test_timeout,
         sec_protocol,
         muxer,
+        relay_addr,
+        ice_server,
         ..
     } = state.0.config;
 
@@ -195,6 +358,12 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
     let muxer = muxer
         .map(|p| format!(r#""{p}""#))
         .unwrap_or("null".to_owned());
+    let relay_addr = relay_addr
+        .map(|a| format!(r#""{a}""#))
+        .unwrap_or("null".to_owned());
+    let ice_server = ice_server
+        .map(|u| format!(r#""{u}""#))
+        .unwrap_or("null".to_owned());
 
     Ok(Html(format!(
         r#"
@@ -203,6 +372,7 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
         <head>
             <meta charset="UTF-8" />
             <title>libp2p ping test</title>
+            <script src="/ice-shim.js"></script>
             <script type="module"">
                 // import a wasm initialization fn and our test entrypoint
                 import init, {{ run_test_wasm }} from "/interop_tests.js";
@@ -214,10 +384,12 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
                     "{transport}",
                     "{ip}",
                     {is_dialer},
-                    "{test_timeout}",
-                    "{BIND_ADDR}",
+                    {test_timeout}n,
+                    "{bind_addr}",
                     {sec_protocol},
-                    {muxer}
+                    {muxer},
+                    {relay_addr},
+                    {ice_server}
                 )
             </script>
         </head>

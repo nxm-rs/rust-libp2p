@@ -1,5 +1,11 @@
 ## 0.5.0
 
+- Add a private-to-private `/webrtc` transport in a new `private` module: it dials and
+  accepts connections on relayed multiaddrs ending in `/webrtc`, exchanging the SDP
+  offer, answer and trickled ICE candidates over a signalling stream on the relayed
+  connection, and the browser's DTLS handshake verifies the certificate fingerprint
+  carried in the exchanged SDP, so no further handshake runs on the direct connection.
+
 - Require `getrandom/js` feature only under `wasm` target.
   See [PR 6102](https://github.com/libp2p/rust-libp2p/pull/6102)
 

@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <title>js-libp2p /webrtc interop peer</title>
+    <!-- Must run before the bundle: index.browser.js of @libp2p/webrtc captures
+         globalThis.RTCPeerConnection at module-evaluation time. -->
+    <script src="./shim.js"></script>
+    <script type="module" src="./bundle.js"></script>
+</head>
+<body>
+    <pre id="status">booting</pre>
+</body>
+</html>

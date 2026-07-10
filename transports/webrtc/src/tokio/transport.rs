@@ -123,11 +123,10 @@ impl libp2p_core::Transport for Transport {
         dial_opts: DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         if dial_opts.role.is_listener() {
-            // TODO: As the listener of a WebRTC hole punch, we need to send a random UDP packet to
-            // the `addr`. See DCUtR specification below.
-            //
-            // https://github.com/libp2p/specs/blob/master/relay/DCUtR.md#the-protocol
-            tracing::warn!("WebRTC hole punch is not yet supported");
+            // The webrtc-direct handshake uses fixed DTLS roles, so a listener-role dial
+            // cannot succeed. NAT'd peers are reachable over the private-to-private
+            // transport in [`crate::tokio::private`] instead.
+            return Err(TransportError::Other(Error::UnsupportedHolePunch));
         }
 
         let (sock_addr, server_fingerprint) = libp2p_webrtc_utils::parse_webrtc_dial_addr(&addr)
