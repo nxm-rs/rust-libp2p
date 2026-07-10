@@ -39,8 +39,9 @@ pub struct Stream {
     send: SendStream,
     /// The recv half of the stream. Reports FIN/reset on its own; the sole source of read EOF.
     recv: RecvStream,
-    /// Cached result of shutting down the **send** half, used only to make [`Self::poll_close`]
-    /// idempotent ("fuse"able). Never gates reads.
+    /// Cached result of shutting down the **send** half, used only to make the
+    /// [`AsyncWrite::poll_close`](futures::AsyncWrite::poll_close) impl idempotent ("fuse"able).
+    /// Never gates reads.
     send_close: Option<Result<(), io::ErrorKind>>,
 }
 
