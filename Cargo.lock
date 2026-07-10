@@ -3832,6 +3832,7 @@ dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "libp2p-noise",
+ "libp2p-quicreuse",
  "libp2p-timer",
  "libp2p-tls",
  "quinn",
@@ -5126,7 +5127,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "git+https://github.com/mfw78/quinn.git?branch=feat/incoming-alpn#bbd950f3144a787a468291058ed4ab32c0e5a5f0"
+source = "git+https://github.com/mfw78/quinn.git?rev=d9635714#d9635714f4909e574146c8cc04846bc36beb31df"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -5136,7 +5137,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.9",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5146,7 +5147,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/mfw78/quinn.git?branch=feat/incoming-alpn#bbd950f3144a787a468291058ed4ab32c0e5a5f0"
+source = "git+https://github.com/mfw78/quinn.git?rev=d9635714#d9635714f4909e574146c8cc04846bc36beb31df"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -5168,14 +5169,14 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "git+https://github.com/mfw78/quinn.git?branch=feat/incoming-alpn#bbd950f3144a787a468291058ed4ab32c0e5a5f0"
+source = "git+https://github.com/mfw78/quinn.git?rev=d9635714#d9635714f4909e574146c8cc04846bc36beb31df"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.9",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

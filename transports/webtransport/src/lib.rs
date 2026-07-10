@@ -99,22 +99,25 @@
 //! # Ok::<(), libp2p_webtransport::CertificateError>(())
 //! ```
 //!
-//! # Socket reuse & hole punching
+//! # Shared endpoint, socket reuse & hole punching
 //!
-//! Dials are routed through a `quinn::Endpoint` selected from the `(role, port_use)` tuple, exactly
-//! like `libp2p-quic`:
+//! The transport obtains all its QUIC connections from a `libp2p-quicreuse` endpoint holder;
+//! `wtransport` acts purely as the WebTransport/H3 protocol engine over connections it did not
+//! establish (`IncomingSessionFuture::with_quic_connecting` inbound, `connect_over_quic`
+//! outbound) and never owns a socket. [`Transport::with_shared_endpoint`] accepts an externally
+//! shared holder, so WebTransport can co-listen with plain QUIC on **one UDP port**,
+//! demultiplexed by the negotiated ALPN (`h3` here, `libp2p` for raw QUIC). A transport built
+//! with [`Transport::new`] uses a private holder per listener instead.
 //!
-//! * **`PortUse::Reuse`** (the default for ordinary dials, and what DCUtR's `override_role()`
-//!   emits as `(Listener, Reuse)`) dials from an existing listener's **shared** `quinn::Endpoint`
-//!   when one exists — i.e. the listener's own UDP socket — preserving the NAT 4-tuple. Without a
-//!   listener it reuses a cached per-family ephemeral dialer endpoint.
-//! * **`(Listener, New)`** (a coordinated DCUtR hole-punch) also dials from the listener's shared
-//!   endpoint, so the WebTransport session rides the hole-punched path. (This previously failed
-//!   with `Error::HolePunchingUnsupported`.)
+//! Dials are routed through a holder selected from the `(role, port_use)` tuple, exactly like
+//! `libp2p-quic`:
 //!
-//! This is enabled by driving `wtransport`'s WebTransport/H3 client handshake over an
-//! externally-established `quinn::Connection` (via the fork's `wtransport::endpoint::connect_over_quic`)
-//! rather than letting `wtransport` bind its own client socket.
+//! * **`PortUse::Reuse`** (the default for ordinary dials, and what DCUtR's `override_role()` emits
+//!   as `(Listener, Reuse)`) dials from an existing listener's holder when one exists, i.e. the
+//!   listener's own UDP socket, preserving the NAT 4-tuple. Without a listener it reuses the
+//!   constructor-shared holder or a cached per-family ephemeral dialer holder.
+//! * **`(Listener, New)`** (a coordinated DCUtR hole-punch) also dials from the listener's holder,
+//!   so the WebTransport session rides the hole-punched path.
 //!
 //! # Limitations
 //!
