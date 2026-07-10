@@ -84,6 +84,60 @@ For the browser (wasm) peer, run the `wasm_ping` harness inside the slot image w
 stock Chrome + chromedriver (e.g. based on `selenium/standalone-chrome`); the
 harness threads `ice_server` and `relay_addr` from the container env into the page.
 
+## The four peer images
+
+`build-images.sh` builds one image per peer type (plus the relay and NAT router
+images). All four share the same rendezvous (redis `listenerAddr` list), the same
+external relay and the same STUN knob, so any of the 16 listener/dialer pairings
+works. Every image accepts `listener` or `dialer` as its container command.
+
+| type          | image                        | what runs inside                                                        |
+| ------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `rust-native` | `natwebrtc-peer-rust-native` | the rust interop harness binary (`native_ping`), `libp2p-webrtc` tokio  |
+| `rust-wasm`   | `natwebrtc-peer-rust-wasm`   | `wasm_ping` + stock Chrome/chromedriver (selenium base), `libp2p-webrtc-websys` wasm bundle |
+| `js-node`     | `natwebrtc-peer-js-node`     | `js-webrtc/` peer on node 22, `@libp2p/webrtc` + node-datachannel       |
+| `js-browser`  | `natwebrtc-peer-js-browser`  | `peers/js-browser/` esbuild bundle of `@libp2p/webrtc` in stock Chrome, driven by playwright-core |
+
+Host prerequisites for `build-images.sh`: cargo with the wasm32 std, `wasm-pack`,
+and a static libc (`native_ping`/`wasm_ping` are linked with crt-static so any
+base image works). On NixOS run the steps in separate shells (a visible static
+libc breaks proc-macro dylib linking during the wasm build):
+
+```sh
+./build-images.sh relay
+nix-shell -p wasm-pack --run './build-images.sh wasm'
+nix-shell -p glibc.static --run './build-images.sh bins'
+./build-images.sh docker
+```
+
+## Running a pair
+
+```sh
+./run-pair.sh <peerA> <peerB>   # peerA = listener in lan_a, peerB = dialer in lan_b
+./run-pair.sh rust-wasm js-node
+```
+
+The script brings the topology up under a unique compose project
+(`natwebrtc-<peerA>-<peerB>`), waits for the dialer to finish, asserts a
+successful libp2p ping over a connection whose remote address contains
+`/webrtc`, prints the winning ICE candidate pair per peer (srflx vs relay, see
+below), captures all container logs under `logs/pair-*/` and tears everything
+down (`down -v --remove-orphans`). `ICE_SERVER='turn:172.40.0.10:3478?transport=udp'`
+forces the TURN fallback path.
+
+## Smoking the peer images
+
+```sh
+./smoke-peers.sh                # all four types
+./smoke-peers.sh js-browser     # a subset
+```
+
+Per image (injected as the lan_a listener, no pair): asserts that the container
+boots and builds a libp2p node, that its relay reservation succeeds through the
+NAT (the advertised `/p2p-circuit/webrtc` multiaddr appears in redis) and that a
+STUN binding from inside the peer's network namespace yields a server-reflexive
+candidate equal to nat_a's pub address.
+
 ## Self-check
 
 ```sh
