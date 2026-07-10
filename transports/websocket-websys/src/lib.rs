@@ -126,29 +126,37 @@ impl libp2p_core::Transport for Transport {
 // Try to convert Multiaddr to a Websocket url.
 fn extract_websocket_url(addr: &Multiaddr) -> Option<String> {
     let mut protocols = addr.iter();
-    let host_port = match (protocols.next(), protocols.next()) {
-        (Some(Protocol::Ip4(ip)), Some(Protocol::Tcp(port))) => {
-            format!("{ip}:{port}")
-        }
-        (Some(Protocol::Ip6(ip)), Some(Protocol::Tcp(port))) => {
-            format!("[{ip}]:{port}")
-        }
+
+    // The host the browser connects to and the port carried by `/tcp`. The host
+    // can later be overridden by a `/sni/<host>` component (see below).
+    let (mut host, port) = match (protocols.next(), protocols.next()) {
+        (Some(Protocol::Ip4(ip)), Some(Protocol::Tcp(port))) => (ip.to_string(), port),
+        (Some(Protocol::Ip6(ip)), Some(Protocol::Tcp(port))) => (format!("[{ip}]"), port),
         (Some(Protocol::Dns(h)), Some(Protocol::Tcp(port)))
         | (Some(Protocol::Dns4(h)), Some(Protocol::Tcp(port)))
-        | (Some(Protocol::Dns6(h)), Some(Protocol::Tcp(port))) => {
-            format!("{}:{}", h, port)
-        }
+        | (Some(Protocol::Dns6(h)), Some(Protocol::Tcp(port))) => (h.into_owned(), port),
         _ => return None,
     };
 
     let (scheme, wspath) = match (protocols.next(), protocols.next()) {
+        // The AutoTLS form `/tls/sni/<host>/ws`: the browser must open the secure
+        // WebSocket against the SNI host so DNS resolves the `*.libp2p.direct`
+        // name and TLS presents the matching certificate. The SNI host replaces
+        // the address host while the `/tcp` port is kept.
+        (Some(Protocol::Tls), Some(Protocol::Sni(sni))) => {
+            host = sni.into_owned();
+            match protocols.next() {
+                Some(Protocol::Ws(path)) => ("wss", path.into_owned()),
+                _ => return None,
+            }
+        }
         (Some(Protocol::Tls), Some(Protocol::Ws(path))) => ("wss", path.into_owned()),
         (Some(Protocol::Ws(path)), _) => ("ws", path.into_owned()),
         (Some(Protocol::Wss(path)), _) => ("wss", path.into_owned()),
         _ => return None,
     };
 
-    Some(format!("{scheme}://{host_port}{wspath}"))
+    Some(format!("{scheme}://{host}:{port}{wspath}"))
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -394,12 +402,19 @@ impl AsyncWrite for Connection {
 
         let bytes_to_send = min(buf.len(), remaining_space);
 
-        if this
-            .inner
-            .socket
-            .send_with_u8_array(&buf[..bytes_to_send])
-            .is_err()
-        {
+        // Copy the bytes into a fresh, JS-heap-backed `Uint8Array` before handing
+        // them to `WebSocket.send`. `send_with_u8_array` builds a view directly
+        // over the caller's slice, which under a threaded wasm build is backed by
+        // a `SharedArrayBuffer`; browsers reject sending a shared-memory view with
+        // "The provided ArrayBufferView value must not be shared", and that throw
+        // surfaces as `BrokenPipe` mid-handshake. Allocating with
+        // `Uint8Array::new_with_length` puts the buffer on the JS heap (never
+        // shared) and `copy_from` copies the payload in, so the send is valid
+        // whether or not wasm linear memory is shared.
+        let array = js_sys::Uint8Array::new_with_length(bytes_to_send as u32);
+        array.copy_from(&buf[..bytes_to_send]);
+
+        if this.inner.socket.send_with_array_buffer_view(&array).is_err() {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
 
@@ -407,14 +422,28 @@ impl AsyncWrite for Connection {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.buffered_amount() == 0 {
-            return Poll::Ready(Ok(()));
-        }
+        let this = self.get_mut();
+        this.inner.error_barrier()?;
 
-        self.inner.error_barrier()?;
+        // A browser `WebSocket.send()` already queues the bytes for asynchronous
+        // delivery: once `poll_write` has returned, the data is owned by the
+        // browser and will be put on the wire without any further driving from
+        // this task. Application-level flush therefore only needs the socket to
+        // be open, not for the browser's internal send queue (`bufferedAmount`)
+        // to fully drain.
+        //
+        // Waiting for `bufferedAmount == 0` is both unnecessary and harmful: the
+        // drain is observed only by a 100ms interval timer, so a flush issued
+        // mid-handshake (for example between multistream-select frames or inside
+        // the Noise handshake) parks until that timer fires. Under the wasm
+        // executor that stall is long enough that the remote tears the
+        // connection down, surfacing as `BrokenPipe`. Backpressure is still
+        // bounded in `poll_write`, which refuses to enqueue more than
+        // `MAX_BUFFER` bytes, so returning ready here cannot grow the browser's
+        // buffer without limit.
+        futures::ready!(this.inner.poll_open(cx))?;
 
-        self.inner.write_waker.register(cx.waker());
-        Poll::Pending
+        Poll::Ready(Ok(()))
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -551,6 +580,22 @@ mod tests {
         let addr = "/ip4/127.0.0.1/tcp/2222/ws".parse::<Multiaddr>().unwrap();
         let url = extract_websocket_url(&addr).unwrap();
         assert_eq!(url, "ws://127.0.0.1:2222/");
+
+        // Check the AutoTLS `/tls/sni/<host>/ws` form: the SNI host replaces the
+        // address host and the `/tcp` port is kept.
+        let addr = "/ip4/116.202.168.171/tcp/31704/tls/sni/example.libp2p.direct/ws"
+            .parse::<Multiaddr>()
+            .unwrap();
+        let url = extract_websocket_url(&addr).unwrap();
+        assert_eq!(url, "wss://example.libp2p.direct:31704/");
+
+        // Check `/tls/sni/<host>/ws` with `/p2p`
+        let addr =
+            format!("/ip4/116.202.168.171/tcp/31704/tls/sni/example.libp2p.direct/ws/p2p/{peer_id}")
+                .parse()
+                .unwrap();
+        let url = extract_websocket_url(&addr).unwrap();
+        assert_eq!(url, "wss://example.libp2p.direct:31704/");
 
         // Check that `/tls/wss` is invalid
         let addr = "/ip4/127.0.0.1/tcp/2222/tls/wss"
