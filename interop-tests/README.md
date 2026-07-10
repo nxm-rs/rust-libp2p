@@ -81,7 +81,7 @@ this matrix on manual dispatch; locally, follow the Compose instructions below w
 `--extra-version=$RUST_LIBP2P/interop-tests/native-ping-webrtc-version.json` (or the
 chromium variant) and `--name-filter="rust-libp2p-head"`.
 
-Conformance surface exercised against the reference implementation: multiaddr parsing
+Conformance surface exercised against js-libp2p: multiaddr parsing
 of `<relay>/p2p-circuit/webrtc/p2p/<peer-id>`, the protobuf framing and message flow of
 `/webrtc-signaling/0.0.1` (offer, answer, trickled ICE candidates), SDP and certificate
 fingerprint handling, and ICE establishment of the direct connection.
