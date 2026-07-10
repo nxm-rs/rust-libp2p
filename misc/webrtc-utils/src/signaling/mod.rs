@@ -7,9 +7,12 @@
 //! Messages are protobuf-encoded and prefixed with their length in bytes, encoded as an
 //! unsigned varint per the multiformats spec.
 
+mod behaviour;
+
 use std::{collections::VecDeque, convert::Infallible, io, iter};
 
 use asynchronous_codec::{BytesMut, Framed};
+pub use behaviour::{Behaviour, Control, IncomingStreams, OpenStreamError, SignalingStream};
 use futures::{
     AsyncRead, AsyncWrite, SinkExt, StreamExt, future,
     stream::{SplitSink, SplitStream},

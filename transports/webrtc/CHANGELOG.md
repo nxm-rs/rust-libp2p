@@ -1,5 +1,12 @@
 ## 0.10.0-alpha
 
+- Add a private-to-private `/webrtc` transport in `tokio::private`: SDP offers, answers
+  and trickled ICE candidates are exchanged over a signalling stream on a relayed
+  connection, both sides run a full ICE agent with configurable ICE servers, and the
+  DTLS handshake verifies the certificate fingerprint carried in the exchanged SDP.
+  Listener-role dials on the webrtc-direct transport now fail with an explicit error
+  instead of logging that hole punching is unsupported.
+
 - Update webrtc-rs to `v0.17` and fix libp2p noise data channel negotiation.
   See [PR 6429](https://github.com/libp2p/rust-libp2p/pull/6429)
 
