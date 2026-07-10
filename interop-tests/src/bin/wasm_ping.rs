@@ -2,13 +2,13 @@
 
 use std::{future::IntoFuture, process::Stdio, time::Duration};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use axum::{
-    Json, Router,
     extract::State,
-    http::{StatusCode, Uri, header},
+    http::{header, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
+    Json, Router,
 };
 use interop_tests::{BlpopRequest, Report, RpushRequest};
 use redis::{AsyncCommands, Client};
@@ -20,7 +20,7 @@ use tokio::{
     sync::mpsc,
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod config;
 
@@ -89,8 +89,13 @@ async fn main() -> Result<()> {
         .route("/rpush", post(redis_rpush))
         // Report tests status
         .route("/results", post(post_results))
+        // Relay ICE diagnostics (e.g. the selected candidate pair) from the browser
+        // to this wrapper's stdout, where the NAT harness log capture finds them.
+        .route("/ice", post(post_ice))
         // Wasm ping test trigger
         .route("/", get(serve_index_html))
+        // RTCPeerConnection wrapper reporting the selected ICE candidate pair
+        .route("/ice-shim.js", get(serve_ice_shim))
         // Wasm app static files
         .fallback(serve_wasm_pkg)
         // Middleware
@@ -207,6 +212,83 @@ async fn redis_rpush(
     Ok(())
 }
 
+/// A pre-wasm shim that wraps `window.RTCPeerConnection` (web-sys resolves the
+/// constructor through the global at call time) and, once a connection reaches the
+/// `connected` state, reads the nominated candidate pair from `getStats()` and
+/// reports it: to the console, and to this wrapper's `/ice` endpoint so it lands in
+/// the container log. The candidate types (host/srflx/relay) tell whether the
+/// double-NAT was hole-punched via STUN or fell back to a TURN relay.
+const ICE_SHIM_JS: &str = r#"
+(() => {
+    const Native = window.RTCPeerConnection;
+    if (!Native) { return; }
+
+    async function report(pc) {
+        const stats = await pc.getStats();
+        const byId = new Map();
+        stats.forEach((s) => byId.set(s.id, s));
+        let pair = null;
+        stats.forEach((s) => {
+            if (s.type === "transport" && s.selectedCandidatePairId) {
+                pair = byId.get(s.selectedCandidatePairId) ?? pair;
+            }
+        });
+        if (!pair) {
+            stats.forEach((s) => {
+                if (!pair && s.type === "candidate-pair"
+                    && s.state === "succeeded" && (s.nominated || s.selected)) {
+                    pair = s;
+                }
+            });
+        }
+        if (!pair) { return false; }
+        const local = byId.get(pair.localCandidateId) ?? {};
+        const remote = byId.get(pair.remoteCandidateId) ?? {};
+        const fmt = (c) =>
+            `${c.candidateType ?? "?"} ${c.ip ?? c.address ?? "?"}:${c.port ?? "?"}`;
+        const line = `ICE_SELECTED_PAIR local=${fmt(local)} remote=${fmt(remote)}`
+            + " (selected candidate pair)";
+        console.log(line);
+        try {
+            await fetch("/ice", {
+                method: "POST",
+                headers: { "content-type": "text/plain" },
+                body: line,
+            });
+        } catch (_) {}
+        return true;
+    }
+
+    window.RTCPeerConnection = class extends Native {
+        constructor(...args) {
+            super(...args);
+            const poll = setInterval(async () => {
+                const state = this.connectionState;
+                if (state === "closed" || state === "failed") {
+                    clearInterval(poll);
+                    return;
+                }
+                if ((state === "connected" || this.iceConnectionState === "connected")
+                    && await report(this).catch(() => false)) {
+                    clearInterval(poll);
+                }
+            }, 1000);
+        }
+    };
+})();
+"#;
+
+async fn serve_ice_shim() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/javascript")], ICE_SHIM_JS)
+}
+
+/// Receive ICE diagnostics from the browser page and print them, so that
+/// "which candidate pair won: srflx or relay?" can be answered from the
+/// container log of this wrapper (see nat-browser/scripts/ice-report.sh).
+async fn post_ice(body: String) {
+    println!("{body}");
+}
+
 /// Receive test results
 async fn post_results(
     state: State<TestState>,
@@ -253,6 +335,7 @@ async fn serve_index_html(state: State<TestState>) -> Result<impl IntoResponse, 
         <head>
             <meta charset="UTF-8" />
             <title>libp2p ping test</title>
+            <script src="/ice-shim.js"></script>
             <script type="module"">
                 // import a wasm initialization fn and our test entrypoint
                 import init, {{ run_test_wasm }} from "/interop_tests.js";
