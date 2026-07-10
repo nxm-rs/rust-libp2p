@@ -1,5 +1,8 @@
 ## 0.57.0
 
+- Add `libp2p-webtransport` re-export behind the `webtransport` feature flag, providing native
+  (non-wasm) WebTransport support.
+  See [PR 1](https://github.com/nxm-rs/rust-libp2p/pull/1).
 - Remove `wasm-bindgen` feature and make `wasm` support implicit.
   See [PR 6102](https://github.com/libp2p/rust-libp2p/pull/6102)
 - Raise MSRV to 1.88.0.

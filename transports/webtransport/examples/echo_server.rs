@@ -92,25 +92,45 @@ async fn main() {
     }
 }
 
-/// Drive a single accepted connection: open one outbound stream (write `1`) and echo every
-/// inbound stream.
+/// Drive a single accepted connection.
+///
+/// Mirrors the go-libp2p echo-server: eagerly open outbound streams (each writing a single `1`
+/// byte so the remote can exercise *inbound* streams) *and* accept inbound streams, echoing both.
+/// QUIC flow-control bounds how many unaccepted outbound streams we open at once, so this keeps
+/// pace with what the remote actually accepts (the websys test suite opens many concurrent
+/// streams in both directions over a single connection).
 async fn serve_conn(mut conn: StreamMuxerBox) {
-    if let Ok(mut stream) = poll_fn(|cx| conn.poll_outbound_unpin(cx)).await {
-        let _ = stream.write_all(b"1").await;
-        let _ = stream.flush().await;
-        tokio::spawn(echo(stream));
-    }
+    use std::task::Poll;
+
+    use futures::future::Either;
 
     loop {
         let next = poll_fn(|cx| {
-            // Drive connection-level events (e.g. address changes) then accept the next stream.
+            // Drive connection-level events (e.g. address changes), then make progress on opening
+            // an outbound stream or accepting an inbound one — whichever is ready first.
             let _ = conn.poll_unpin(cx)?;
-            conn.poll_inbound_unpin(cx)
+            if let Poll::Ready(stream) = conn.poll_outbound_unpin(cx) {
+                return Poll::Ready(stream.map(Either::Left));
+            }
+            if let Poll::Ready(stream) = conn.poll_inbound_unpin(cx) {
+                return Poll::Ready(stream.map(Either::Right));
+            }
+            Poll::Pending
         })
         .await;
 
         match next {
-            Ok(stream) => {
+            // Outbound stream we opened: announce it with a single byte, then echo.
+            Ok(Either::Left(mut stream)) => {
+                tokio::spawn(async move {
+                    if stream.write_all(b"1").await.is_ok() {
+                        let _ = stream.flush().await;
+                        echo(stream).await;
+                    }
+                });
+            }
+            // Inbound stream opened by the remote: echo it.
+            Ok(Either::Right(stream)) => {
                 tokio::spawn(echo(stream));
             }
             Err(e) => {

@@ -15,6 +15,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
 echo "Tests: $PWD"
 
+# Build the native echo server *before* backgrounding it, so a cold cargo compile
+# does not eat into the discovery-endpoint readiness window below.
+cargo build --quiet -p libp2p-webtransport --example echo_server || exit 1
+
 # Start the native echo server (serves its multiaddr on 127.0.0.1:4455).
 cargo run --quiet -p libp2p-webtransport --example echo_server &
 server_pid=$!
