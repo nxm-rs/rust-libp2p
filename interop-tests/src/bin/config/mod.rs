@@ -11,6 +11,10 @@ pub(crate) struct Config {
     pub(crate) is_dialer: bool,
     pub(crate) test_timeout: u64,
     pub(crate) redis_addr: String,
+    /// Multiaddr of an external Circuit Relay v2 node for `/webrtc` listeners,
+    /// including the `/p2p/<relay-peer-id>` suffix. When absent, the listener spawns an
+    /// in-process relay.
+    pub(crate) relay_addr: Option<String>,
 }
 
 impl Config {
@@ -30,6 +34,7 @@ impl Config {
 
         let sec_protocol = env::var("security").ok();
         let muxer = env::var("muxer").ok();
+        let relay_addr = env::var("relay_addr").ok();
 
         Ok(Self {
             transport,
@@ -39,6 +44,7 @@ impl Config {
             is_dialer,
             test_timeout,
             redis_addr,
+            relay_addr,
         })
     }
 }
