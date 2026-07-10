@@ -46,6 +46,7 @@ full = [
     "webrtc-websys",
     "websocket-websys",
     "websocket",
+    "webtransport",
     "webtransport-websys",
     "yamux",
     "upnp",
@@ -85,6 +86,7 @@ uds = ["dep:libp2p-uds"]
 webrtc-websys = ['dep:libp2p-webrtc-websys']
 websocket-websys = ["dep:libp2p-websocket-websys"]
 websocket = ["dep:libp2p-websocket"]
+webtransport = ["dep:libp2p-webtransport"]
 webtransport-websys = ["dep:libp2p-webtransport-websys"]
 yamux = ["dep:libp2p-yamux"]
 upnp = ["dep:libp2p-upnp"]
@@ -120,6 +122,7 @@ thiserror = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 libp2p-webrtc-websys = { workspace = true, optional = true }
+
 libp2p-websocket-websys = { workspace = true, optional = true }
 libp2p-webtransport-websys = { workspace = true, optional = true }
 
@@ -128,6 +131,7 @@ libp2p-dns = { workspace = true, optional = true }
 libp2p-mdns = { workspace = true, optional = true }
 libp2p-memory-connection-limits = { workspace = true, optional = true }
 libp2p-quic = { workspace = true, optional = true }
+libp2p-webtransport = { workspace = true, optional = true }
 libp2p-tcp = { workspace = true, optional = true }
 libp2p-tls = { workspace = true, optional = true }
 libp2p-uds = { workspace = true, optional = true }
