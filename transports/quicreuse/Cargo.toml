@@ -9,7 +9,7 @@ license = "MIT"
 
 [dependencies]
 futures = { workspace = true }
-quinn = { version = "0.11.9", default-features = false, features = ["rustls", "runtime-tokio"] }
+quinn = { version = "0.11.11", default-features = false, features = ["rustls", "runtime-tokio"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, default-features = false, features = ["rt"] }
 tracing = { workspace = true }

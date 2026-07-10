@@ -176,16 +176,13 @@ libp2p-identity = { path = "identity" }
 # header before the pseudo-headers, violating RFC 9114 §4.3. go-libp2p (quic-go) then rejects the
 # WebTransport CONNECT request stream with H3_MESSAGE_ERROR, so native dials to go-libp2p fail.
 # (The companion lowercase-header-name fix lives in transports/webtransport/src/transport.rs.)
-# Pinned to our own fork carrying the fix from BiagioFesta/wtransport#310 — by rev, on a repo we
-# control, so the ref can't be force-pushed or deleted out from under us.
-# TODO: drop once a wtransport release contains the header-ordering fix.
 #
-# Pinned to our own fork carrying the header-ordering fix plus the client-side
-# `wtransport::endpoint::connect_over_quic` API (drives the H3/WebTransport handshake over an
-# externally-owned `quinn::Connection`), used together with the existing `with_quic_connecting`
-# server hook so WebTransport rides the shared libp2p-quic `quinn::Endpoint`. Pinned by immutable
-# rev on a repo we control so the ref can't be force-pushed or deleted out from under us.
-# TODO: upstream the fork APIs to BiagioFesta/wtransport.
+# Pinned to our own fork carrying that header-ordering fix (BiagioFesta/wtransport#310) plus the
+# client-side `wtransport::endpoint::connect_over_quic` API (drives the H3/WebTransport handshake
+# over an externally-owned `quinn::Connection`), used together with the existing
+# `with_quic_connecting` server hook so WebTransport rides the shared libp2p-quic `quinn::Endpoint`.
+# Pinned by immutable rev on a repo we control so the ref can't be force-pushed or deleted out from
+# under us. TODO: upstream the fork APIs to BiagioFesta/wtransport and drop once released.
 wtransport = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
 wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
 
