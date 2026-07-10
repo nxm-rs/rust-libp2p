@@ -30,9 +30,9 @@ use futures::{
     future::{BoxFuture, Either, Select, select},
     ready,
 };
-use futures_timer::Delay;
 use libp2p_core::upgrade::InboundConnectionUpgrade;
 use libp2p_identity::PeerId;
+use libp2p_timer::Delay;
 use wtransport::endpoint::SessionRequest;
 
 use crate::{Connection, Error};

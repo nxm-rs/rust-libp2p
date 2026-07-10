@@ -36,15 +36,6 @@
 //! the first bidirectional stream (without `multistream-select`). The certificate hashes are
 //! bound to the authenticated peer via the Noise `webtransport_certhashes` extension.
 //!
-//! # Limitations
-//!
-//! * **No DCUtR hole punching:** a coordinated hole-punch dial (`DialOpts { role:
-//!   Endpoint::Listener, port_use: PortUse::New, .. }`) fails with
-//!   [`Error::HolePunchingUnsupported`], because `wtransport`'s client endpoint cannot dial from
-//!   the listener's socket.
-//! * **`PortUse::Reuse` is not honoured:** ordinary dials always bind a fresh ephemeral socket.
-//! * **Only the `h3` ALPN is offered** by the server.
-//!
 //! ## Certificate rotation
 //!
 //! Because the self-signed certificate is short-lived (under 14 days, the browser ceiling for
@@ -107,6 +98,15 @@
 //! assert_eq!(restored, cert);
 //! # Ok::<(), libp2p_webtransport::CertificateError>(())
 //! ```
+//!
+//! # Limitations
+//!
+//! * **No DCUtR hole punching:** a coordinated hole-punch dial (`DialOpts { role:
+//!   Endpoint::Listener, port_use: PortUse::New, .. }`) fails with
+//!   [`Error::HolePunchingUnsupported`], because `wtransport`'s client endpoint cannot dial from
+//!   the listener's socket.
+//! * **`PortUse::Reuse` is not honoured:** ordinary dials always bind a fresh ephemeral socket.
+//! * **Only the `h3` ALPN is offered** by the server.
 //!
 //! [WebTransport]: https://www.w3.org/TR/webtransport/
 //! [`wtransport`]: https://docs.rs/wtransport
@@ -188,6 +188,7 @@ pub enum Error {
     /// Invalid certificate configuration (e.g. an empty certificate set).
     #[error(transparent)]
     Config(#[from] ConfigError),
+
     /// Coordinated hole punching (DCUtR) was requested by dialing with
     /// `DialOpts { role: Endpoint::Listener, port_use: PortUse::New, .. }`, but this transport
     /// cannot dial from the listener's socket: the underlying `wtransport` API only exposes

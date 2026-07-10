@@ -10,7 +10,7 @@ readme = "README.md"
 
 [dependencies]
 futures = { workspace = true }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 if-watch = { workspace = true, features = ["tokio"] }
 libp2p-core = { workspace = true }
 libp2p-identity = { workspace = true, features = ["ed25519", "rand"] }

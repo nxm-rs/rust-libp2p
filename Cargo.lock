@@ -3814,11 +3814,11 @@ name = "libp2p-webtransport"
 version = "0.1.0"
 dependencies = [
  "futures",
- "futures-timer",
  "if-watch",
  "libp2p-core",
  "libp2p-identity",
  "libp2p-noise",
+ "libp2p-timer",
  "libp2p-tls",
  "quinn",
  "rcgen 0.13.2",
@@ -8246,7 +8246,7 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 [[package]]
 name = "wtransport"
 version = "0.7.1"
-source = "git+https://github.com/mfw78/wtransport.git?rev=8ebdde112e3e7dd558e662a2e7ebc147e2547112#8ebdde112e3e7dd558e662a2e7ebc147e2547112"
+source = "git+https://github.com/mfw78/wtransport.git?rev=49bba00150dc#49bba00150dccaf32fb1189801303fa9740f335a"
 dependencies = [
  "bytes",
  "pem",
@@ -8269,7 +8269,7 @@ dependencies = [
 [[package]]
 name = "wtransport-proto"
 version = "0.7.1"
-source = "git+https://github.com/mfw78/wtransport.git?rev=8ebdde112e3e7dd558e662a2e7ebc147e2547112#8ebdde112e3e7dd558e662a2e7ebc147e2547112"
+source = "git+https://github.com/mfw78/wtransport.git?rev=49bba00150dc#49bba00150dccaf32fb1189801303fa9740f335a"
 dependencies = [
  "httlib-huffman",
  "octets",

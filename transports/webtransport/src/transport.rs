@@ -231,7 +231,7 @@ impl libp2p_core::Transport for Transport {
         Ok(async move {
             let connect = connect(socket_addr, cert_hashes, expected_peer_id, keypair);
             futures::pin_mut!(connect);
-            match future::select(connect, futures_timer::Delay::new(handshake_timeout)).await {
+            match future::select(connect, libp2p_timer::Delay::new(handshake_timeout)).await {
                 future::Either::Left((res, _)) => res,
                 future::Either::Right(((), _)) => Err(Error::HandshakeTimedOut),
             }
@@ -296,7 +296,7 @@ struct Listener {
     quic_params: QuicParams,
     /// Fires when the active certificate should be rotated. Actively polled every `poll_next` pass
     /// so an idle listener still wakes to rotate.
-    rotation_timer: futures_timer::Delay,
+    rotation_timer: libp2p_timer::Delay,
     /// Clock used by rotation. Production reads [`OffsetDateTime::now_utc`]; tests inject a clock
     /// so rotation can be exercised in bounded (sub-second) time.
     now_fn: Box<dyn Fn() -> OffsetDateTime + Send>,
@@ -341,7 +341,7 @@ impl Listener {
         }
 
         let rotation_timer =
-            futures_timer::Delay::new(rotation_delay(&certs, OffsetDateTime::now_utc()));
+            libp2p_timer::Delay::new(rotation_delay(&certs, OffsetDateTime::now_utc()));
 
         Ok(Listener {
             listener_id,
@@ -471,7 +471,7 @@ impl Listener {
         match self.rotate(now) {
             Ok(()) => {
                 // Re-arm to the next deadline derived solely from the local clock + cert validity.
-                self.rotation_timer = futures_timer::Delay::new(rotation_delay(&self.certs, now));
+                self.rotation_timer = libp2p_timer::Delay::new(rotation_delay(&self.certs, now));
             }
             Err(error) => {
                 tracing::warn!(
@@ -486,7 +486,7 @@ impl Listener {
                         listener_id: self.listener_id,
                         error,
                     });
-                self.rotation_timer = futures_timer::Delay::new(GENERATION_FAILURE_BACKOFF);
+                self.rotation_timer = libp2p_timer::Delay::new(GENERATION_FAILURE_BACKOFF);
             }
         }
     }
@@ -1056,6 +1056,79 @@ mod test {
         (keypair, cert)
     }
 
+    /// A per-test clock the rotation engine reads via the `now_fn` seam. Each listener gets its own
+    /// handle, so concurrently-running tests never contend on a shared clock.
+    #[derive(Clone)]
+    struct TestClock(StdArc<AtomicI64>);
+
+    impl TestClock {
+        fn new(t: OffsetDateTime) -> Self {
+            Self(StdArc::new(AtomicI64::new(t.unix_timestamp_nanos() as i64)))
+        }
+        fn set(&self, t: OffsetDateTime) {
+            self.0
+                .store(t.unix_timestamp_nanos() as i64, Ordering::SeqCst);
+        }
+        fn now_fn(&self) -> Box<dyn Fn() -> OffsetDateTime + Send> {
+            let inner = self.0.clone();
+            Box::new(move || {
+                OffsetDateTime::from_unix_timestamp_nanos(inner.load(Ordering::SeqCst) as i128)
+                    .unwrap()
+            })
+        }
+    }
+
+    /// Build a `Listener` bound to an ephemeral loopback port with the given certificate set and a
+    /// fresh injected clock set to `now`. Returns the listener and its clock handle.
+    fn build_listener_with_clock(
+        certs: Vec<Certificate>,
+        now: OffsetDateTime,
+    ) -> (Listener, TestClock) {
+        let clock = TestClock::new(now);
+        let keypair = Keypair::generate_ed25519();
+        let socket_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let socket = create_socket(socket_addr).unwrap();
+
+        let tls = libp2p_tls::make_webtransport_server_config(
+            certs[0].certificate_der(),
+            &certs[0].private_key_der(),
+            alpn_protocols(),
+        );
+        let quic_params = Config::new(&keypair, certs[0].clone()).quic_params();
+        let server_config = ServerConfig::builder()
+            .with_bind_socket(socket)
+            .with_custom_tls_and_transport(tls, quic_params.build())
+            .build();
+        let endpoint = wtransport::Endpoint::server(server_config).unwrap();
+        let local_addr = endpoint.local_addr().unwrap();
+
+        let mut listener = Listener::new(
+            ListenerId::next(),
+            local_addr,
+            endpoint,
+            &keypair,
+            certs,
+            quic_params,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        listener.now_fn = clock.now_fn();
+        // Drain the initial NewAddress so tests observe only rotation-induced events.
+        let _ = listener.pending_events.pop_front();
+        (listener, clock)
+    }
+
+    /// Convenience for tests that drive `rotate(now)` directly and do not advance the clock through
+    /// `poll_next` (so the clock handle is unused).
+    fn build_listener(certs: Vec<Certificate>, now: OffsetDateTime) -> Listener {
+        build_listener_with_clock(certs, now).0
+    }
+
+    // A short served validity for tests. Must exceed `2 * CLOCK_SKEW_ALLOWANCE` so the
+    // sequential-windows-with-skew model is well-formed, and exceed `ROTATE_BEFORE_EXPIRY` so the
+    // initial active cert is not already "due".
+    const TEST_VALIDITY: TimeDuration = TimeDuration::hours(4);
+
     /// Build a transport plus a dialable WebTransport multiaddr (with a real `/certhash`) that
     /// passes the `multiaddr_to_dial_addr` / `MissingCerthashes` guards, so `dial()`'s
     /// `(role, port_use)` branching can be exercised without any network I/O.
@@ -1187,79 +1260,6 @@ mod test {
             .is_none()
         );
     }
-
-    /// A per-test clock the rotation engine reads via the `now_fn` seam. Each listener gets its own
-    /// handle, so concurrently-running tests never contend on a shared clock.
-    #[derive(Clone)]
-    struct TestClock(StdArc<AtomicI64>);
-
-    impl TestClock {
-        fn new(t: OffsetDateTime) -> Self {
-            Self(StdArc::new(AtomicI64::new(t.unix_timestamp_nanos() as i64)))
-        }
-        fn set(&self, t: OffsetDateTime) {
-            self.0
-                .store(t.unix_timestamp_nanos() as i64, Ordering::SeqCst);
-        }
-        fn now_fn(&self) -> Box<dyn Fn() -> OffsetDateTime + Send> {
-            let inner = self.0.clone();
-            Box::new(move || {
-                OffsetDateTime::from_unix_timestamp_nanos(inner.load(Ordering::SeqCst) as i128)
-                    .unwrap()
-            })
-        }
-    }
-
-    /// Build a `Listener` bound to an ephemeral loopback port with the given certificate set and a
-    /// fresh injected clock set to `now`. Returns the listener and its clock handle.
-    fn build_listener_with_clock(
-        certs: Vec<Certificate>,
-        now: OffsetDateTime,
-    ) -> (Listener, TestClock) {
-        let clock = TestClock::new(now);
-        let keypair = Keypair::generate_ed25519();
-        let socket_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let socket = create_socket(socket_addr).unwrap();
-
-        let tls = libp2p_tls::make_webtransport_server_config(
-            certs[0].certificate_der(),
-            &certs[0].private_key_der(),
-            alpn_protocols(),
-        );
-        let quic_params = Config::new(&keypair, certs[0].clone()).quic_params();
-        let server_config = ServerConfig::builder()
-            .with_bind_socket(socket)
-            .with_custom_tls_and_transport(tls, quic_params.build())
-            .build();
-        let endpoint = wtransport::Endpoint::server(server_config).unwrap();
-        let local_addr = endpoint.local_addr().unwrap();
-
-        let mut listener = Listener::new(
-            ListenerId::next(),
-            local_addr,
-            endpoint,
-            &keypair,
-            certs,
-            quic_params,
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        listener.now_fn = clock.now_fn();
-        // Drain the initial NewAddress so tests observe only rotation-induced events.
-        let _ = listener.pending_events.pop_front();
-        (listener, clock)
-    }
-
-    /// Convenience for tests that drive `rotate(now)` directly and do not advance the clock through
-    /// `poll_next` (so the clock handle is unused).
-    fn build_listener(certs: Vec<Certificate>, now: OffsetDateTime) -> Listener {
-        build_listener_with_clock(certs, now).0
-    }
-
-    // A short served validity for tests. Must exceed `2 * CLOCK_SKEW_ALLOWANCE` so the
-    // sequential-windows-with-skew model is well-formed, and exceed `ROTATE_BEFORE_EXPIRY` so the
-    // initial active cert is not already "due".
-    const TEST_VALIDITY: TimeDuration = TimeDuration::hours(4);
 
     #[tokio::test]
     async fn test_close_listener() {
@@ -1662,7 +1662,7 @@ mod test {
         let id = listener.listener_id;
 
         // Arm the timer to fire immediately and advance the clock past the active window.
-        listener.rotation_timer = futures_timer::Delay::new(Duration::ZERO);
+        listener.rotation_timer = libp2p_timer::Delay::new(Duration::ZERO);
         clock.set(now + TEST_VALIDITY + TimeDuration::seconds(1));
 
         let ev1 = poll_fn(|cx| Pin::new(&mut listener).poll_next(cx)).await;

@@ -103,7 +103,7 @@ async fn run_ping_pong(
                 stream.write_all(b"PONG").await.map_err(|e| e.to_string())?;
                 stream.flush().await.map_err(|e| e.to_string())?;
                 // Keep the connection alive briefly so the dialer can read the response.
-                futures_timer::Delay::new(Duration::from_secs(1)).await;
+                libp2p_timer::Delay::new(Duration::from_secs(1)).await;
 
                 return Ok::<PeerId, String>(remote_peer);
             }
@@ -328,7 +328,7 @@ async fn native_half_closed_read_after_send_close() {
                 stream.flush().await.map_err(|e| e.to_string())?;
                 // Close our writer too so the dialer eventually observes a genuine recv FIN.
                 stream.close().await.map_err(|e| e.to_string())?;
-                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                libp2p_timer::Delay::new(Duration::from_secs(2)).await;
                 return Ok::<(), String>(());
             }
         }
