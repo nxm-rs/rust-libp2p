@@ -142,7 +142,6 @@ libp2p-tcp = { workspace = true, features = ["tokio"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [target.'cfg(target_family="wasm")'.dependencies]
-futures-timer = { workspace = true, features = ["wasm-bindgen"] }
 getrandom = { workspace = true }
 
 # Passing arguments to the docsrs builder in order to properly document cfg's.

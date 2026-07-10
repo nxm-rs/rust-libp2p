@@ -1,5 +1,11 @@
 ## 0.7.0
 
+- Make `SwarmExt::listen` safe for memory-only swarms by skipping the TCP listener when the transport rejects it, instead of panicking on `MultiaddrNotSupported`.
+- Ride tokio's clock for the `next_swarm_event` deadline on native targets so `tokio::time::pause` drives it under test; wasm32 keeps the runtime-agnostic timer.
+- Add `SwarmExt::new_ephemeral_tokio_with_keypair`, `SwarmExt::new_ephemeral_memory_tokio`, and `SwarmExt::new_ephemeral_memory_tokio_with_keypair` for caller-supplied keypairs and memory-only transports.
+  See [PR 6](https://github.com/nxm-rs/rust-libp2p/pull/6).
+- Add `drive_until` and `drive_for` helpers for predicate- and deadline-based swarm driving.
+  See [PR 6](https://github.com/nxm-rs/rust-libp2p/pull/6).
 - Raise MSRV to 1.88.0.
   See [PR 6273](https://github.com/libp2p/rust-libp2p/pull/6273).
 

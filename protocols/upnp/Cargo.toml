@@ -12,7 +12,7 @@ publish = true
 
 [dependencies]
 futures = { workspace = true }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 igd-next = "0.17.1"
 libp2p-core = { workspace = true }
 libp2p-swarm = { workspace = true }

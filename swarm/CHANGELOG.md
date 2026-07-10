@@ -1,5 +1,7 @@
 ## 0.48.0
 
+- Ride tokio's clock for internal connection deadlines on native targets so `tokio::time::pause` drives the substream upgrade timeout and the keep-alive idle timer under test; wasm32 keeps the runtime-agnostic timer.
+
 - Remove `wasm-bindgen` feature and make `wasm` support implicit.
   See [PR 6102](https://github.com/libp2p/rust-libp2p/pull/6102)
 

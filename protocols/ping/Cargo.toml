@@ -12,7 +12,7 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 futures = { workspace = true }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 web-time = { workspace = true }
 libp2p-core = { workspace = true }
 libp2p-swarm = { workspace = true }

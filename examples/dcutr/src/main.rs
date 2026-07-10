@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Wait to listen on all interfaces.
     block_on(async {
-        let mut delay = futures_timer::Delay::new(std::time::Duration::from_secs(1)).fuse();
+        let mut delay = libp2p_timer::Delay::new(std::time::Duration::from_secs(1)).fuse();
         loop {
             futures::select! {
                 event = swarm.next() => {

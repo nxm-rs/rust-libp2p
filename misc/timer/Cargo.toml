@@ -1,0 +1,35 @@
+[package]
+name = "libp2p-timer"
+version = "0.1.0"
+edition.workspace = true
+rust-version = { workspace = true }
+description = "Runtime-aware timer abstraction routing all rust-libp2p waits through one pausable backend"
+license = "MIT"
+publish = false
+
+[package.metadata.release]
+release = false
+
+# `futures-bounded`'s `futures_timer` backend is needed on every target: on wasm it is the only
+# backend, on native it is the off-runtime fallback.
+[dependencies]
+futures-bounded = { workspace = true, features = ["futures-timer"] }
+
+# Native rides tokio's clock (pausable under `start_paused`) when a runtime is present, falling back
+# to `futures-timer` off-runtime. `rt` is required for `Handle::try_current`.
+[target.'cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))'.dependencies]
+futures-bounded = { workspace = true, features = ["tokio"] }
+futures-timer = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+# wasm has no tokio time driver, so `futures-timer` (with its browser-friendly backend) is the sole
+# timer. Centralising the `wasm-bindgen` feature here means consumers get it transitively.
+[target.'cfg(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown"))'.dependencies]
+futures-timer = { workspace = true, features = ["wasm-bindgen"] }
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+
+[lints]
+workspace = true

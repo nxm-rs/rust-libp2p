@@ -199,7 +199,7 @@ where
     },
     Running {
         muxer: &'m mut M,
-        timeout: futures_timer::Delay,
+        timeout: libp2p_timer::Delay,
         proto: BoxFuture<'static, ()>,
     },
     Complete {
@@ -229,7 +229,7 @@ where
                     if let Poll::Ready(stream) = muxer.poll_inbound_unpin(cx) {
                         *this = Harness::Running {
                             muxer,
-                            timeout: futures_timer::Delay::new(Duration::from_secs(10)),
+                            timeout: libp2p_timer::Delay::new(Duration::from_secs(10)),
                             proto: proto_fn(stream.unwrap()),
                         };
                         return Poll::Ready(Some(Event::SetupComplete));
@@ -249,7 +249,7 @@ where
                     if let Poll::Ready(stream) = muxer.poll_outbound_unpin(cx) {
                         *this = Harness::Running {
                             muxer,
-                            timeout: futures_timer::Delay::new(Duration::from_secs(10)),
+                            timeout: libp2p_timer::Delay::new(Duration::from_secs(10)),
                             proto: proto_fn(stream.unwrap()),
                         };
                         return Poll::Ready(Some(Event::SetupComplete));

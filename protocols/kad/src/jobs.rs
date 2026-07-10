@@ -68,8 +68,8 @@ use std::{
 };
 
 use futures::prelude::*;
-use futures_timer::Delay;
 use libp2p_identity::PeerId;
+use libp2p_timer::Delay;
 use web_time::Instant;
 
 use crate::record::{self, ProviderRecord, Record, store::RecordStore};

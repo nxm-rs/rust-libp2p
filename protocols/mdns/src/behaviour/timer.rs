@@ -18,6 +18,21 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+//! mDNS's periodic timer, an accepted native-only exception to the `libp2p-timer` sweep.
+//!
+//! Unlike the rest of the tree, this timer is a *periodic* [`futures::Stream`] built on
+//! `tokio::time::interval_at`, not the oneshot `Delay` future that `libp2p-timer` exposes; the
+//! `libp2p-timer` abstraction has no interval type to sweep it onto without reworking mDNS's
+//! generic [`super::Provider`] seam (which is deliberately kept generic over the timer/socket
+//! backend). Keeping it here is safe because:
+//!   * it is pausable under `tokio::time::pause` / `#[tokio::test(start_paused = true)]`, so it
+//!     does not regress the deterministic paused-time tests that motivate `libp2p-timer`, and
+//!   * `libp2p-mdns` has no wasm target (it needs raw UDP sockets), so the "tokio timer panics on
+//!     wasm" hazard that `libp2p-timer` guards against is unreachable here.
+//!
+//! `scripts/retimer.sh`'s completeness oracle allowlists this file for exactly these reasons; see
+//! the allowlist note in `misc/timer/README.md`.
+
 use std::time::{Duration, Instant};
 
 /// Simple wrapper for the different type of timers

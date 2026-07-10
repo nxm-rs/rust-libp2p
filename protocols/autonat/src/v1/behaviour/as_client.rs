@@ -25,11 +25,11 @@ use std::{
 };
 
 use futures::FutureExt;
-use futures_timer::Delay;
 use libp2p_core::Multiaddr;
 use libp2p_identity::PeerId;
 use libp2p_request_response::{self as request_response, OutboundFailure, OutboundRequestId};
 use libp2p_swarm::{ConnectionId, ListenAddresses, ToSwarm};
+use libp2p_timer::Delay;
 use rand::{seq::SliceRandom, thread_rng};
 use web_time::Instant;
 
