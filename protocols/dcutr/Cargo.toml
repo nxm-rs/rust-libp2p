@@ -33,6 +33,7 @@ libp2p-relay = { workspace = true }
 libp2p-swarm = { workspace = true, features = ["macros"] }
 libp2p-swarm-test = { path = "../../swarm-test" }
 libp2p-tcp = { workspace = true, features = ["tokio"] }
+libp2p-quic = { workspace = true, features = ["tokio"] }
 libp2p-yamux = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
