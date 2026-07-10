@@ -12,7 +12,7 @@ use futures::{
     pin_mut,
     prelude::*,
 };
-use futures_timer::Delay;
+use libp2p_timer::Delay;
 use libp2p_webrtc_utils::signaling::{self, SignalingStream};
 use send_wrapper::SendWrapper;
 use wasm_bindgen::{JsCast, closure::Closure};

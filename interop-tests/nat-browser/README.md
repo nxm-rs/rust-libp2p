@@ -73,7 +73,7 @@ Every slot already receives the STUN url and infrastructure addresses in both
 spellings the peers understand:
 
 - `ice_server` (rust harness: `native_ping`, `wasm_ping`) and `ICE_SERVER`
-  (js peer, `webrtc_p2p_interop` example): `stun:172.40.0.10:3478` by default;
+  (the `js-browser` peer): `stun:172.40.0.10:3478` by default;
   override with `ICE_SERVER=turn:...` to force the TURN fallback.
 - `relay_addr` / `RELAY_ADDR`: the standalone relay multiaddr above. The wasm and
   native harnesses skip their in-process relay when this is set, which is essential
@@ -84,18 +84,17 @@ For the browser (wasm) peer, run the `wasm_ping` harness inside the slot image w
 stock Chrome + chromedriver (e.g. based on `selenium/standalone-chrome`); the
 harness threads `ice_server` and `relay_addr` from the container env into the page.
 
-## The four peer images
+## The three peer images
 
 `build-images.sh` builds one image per peer type (plus the relay and NAT router
-images). All four share the same rendezvous (redis `listenerAddr` list), the same
-external relay and the same STUN knob, so any of the 16 listener/dialer pairings
+images). All three share the same rendezvous (redis `listenerAddr` list), the same
+external relay and the same STUN knob, so any of the 9 listener/dialer pairings
 works. Every image accepts `listener` or `dialer` as its container command.
 
 | type          | image                        | what runs inside                                                        |
 | ------------- | ---------------------------- | ----------------------------------------------------------------------- |
 | `rust-native` | `natwebrtc-peer-rust-native` | the rust interop harness binary (`native_ping`), `libp2p-webrtc` tokio  |
 | `rust-wasm`   | `natwebrtc-peer-rust-wasm`   | `wasm_ping` + stock Chrome/chromedriver (selenium base), `libp2p-webrtc-websys` wasm bundle |
-| `js-node`     | `natwebrtc-peer-js-node`     | `js-webrtc/` peer on node 22, `@libp2p/webrtc` + node-datachannel       |
 | `js-browser`  | `natwebrtc-peer-js-browser`  | `peers/js-browser/` esbuild bundle of `@libp2p/webrtc` in stock Chrome, driven by playwright-core |
 
 Host prerequisites for `build-images.sh`: cargo with the wasm32 std, `wasm-pack`,
@@ -114,7 +113,7 @@ nix-shell -p glibc.static --run './build-images.sh bins'
 
 ```sh
 ./run-pair.sh <peerA> <peerB>   # peerA = listener in lan_a, peerB = dialer in lan_b
-./run-pair.sh rust-wasm js-node
+./run-pair.sh rust-wasm js-browser
 ```
 
 The script brings the topology up under a unique compose project

@@ -4,7 +4,7 @@
 #   run-pair.sh <peerA> <peerB>
 #
 # peerA is injected into lan_a as the LISTENER, peerB into lan_b as the DIALER.
-# Peer types: rust-native | rust-wasm | js-node | js-browser
+# Peer types: rust-native | rust-wasm | js-browser
 #
 # Both peers can only reach the pub network (coturn STUN/TURN, the standalone
 # circuit relay, redis) through their MASQUERADE NAT, so the direct connection
@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     echo "usage: $0 <peerA=listener> <peerB=dialer>" >&2
-    echo "  peer types: rust-native | rust-wasm | js-node | js-browser" >&2
+    echo "  peer types: rust-native | rust-wasm | js-browser" >&2
     exit 2
 }
 
@@ -35,7 +35,6 @@ image_for() {
     case "$1" in
         rust-native) echo natwebrtc-peer-rust-native ;;
         rust-wasm) echo natwebrtc-peer-rust-wasm ;;
-        js-node) echo natwebrtc-peer-js-node ;;
         js-browser) echo natwebrtc-peer-js-browser ;;
         *) echo "unknown peer type: $1" >&2; usage ;;
     esac

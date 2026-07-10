@@ -52,8 +52,15 @@ pub async fn run_test(
     let redis_client = RedisClient::new(redis_addr).context("Could not connect to redis")?;
 
     // Build the transport from the passed ENV var.
-    let (mut swarm, local_addr) =
-        build_swarm(ip, transport, sec_protocol, muxer, ice_server, build_behaviour).await?;
+    let (mut swarm, local_addr) = build_swarm(
+        ip,
+        transport,
+        sec_protocol,
+        muxer,
+        ice_server,
+        build_behaviour,
+    )
+    .await?;
 
     tracing::info!(local_peer=%swarm.local_peer_id(), "Running ping test");
 

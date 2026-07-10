@@ -14,7 +14,7 @@ publish = true
 [dependencies]
 bytes.workspace = true
 futures = { workspace = true }
-futures-timer = { workspace = true }
+libp2p-timer = { workspace = true }
 hex = "0.4.3"
 js-sys = { version = "0.3" }
 libp2p-core = { workspace = true }
@@ -28,7 +28,6 @@ wasm-bindgen-futures = { workspace = true}
 web-sys = { version = "0.3.70", features = ["Document", "Location", "MessageEvent", "Navigator", "RtcCertificate", "RtcConfiguration", "RtcDataChannel", "RtcDataChannelEvent", "RtcDataChannelInit", "RtcDataChannelState", "RtcDataChannelType", "RtcIceCandidate", "RtcIceCandidateInit", "RtcIceServer", "RtcPeerConnection", "RtcPeerConnectionIceEvent", "RtcSdpType", "RtcSessionDescription", "RtcSessionDescriptionInit", "Window"] }
 
 [target.'cfg(target_family="wasm")'.dependencies]
-futures-timer = { workspace = true, features = ["wasm-bindgen"] }
 getrandom = { workspace = true}
 
 [target.'cfg(target_family="wasm")'.dev-dependencies]

@@ -6,8 +6,8 @@
 #      container base image works regardless of glibc),
 #   3. the standalone relay binary (debug, ELF-interpreter-normalized like
 #      selfcheck.sh does),
-#   4. the docker images: relay + NAT router (via compose) and the four peer
-#      images (rust-native, rust-wasm, js-node, js-browser).
+#   4. the docker images: relay + NAT router (via compose) and the three peer
+#      images (rust-native, rust-wasm, js-browser).
 #
 # Usage: build-images.sh [step ...]     steps: wasm bins relay docker (default: all)
 #
@@ -106,12 +106,24 @@ if run_step docker; then
     docker compose -f "$SCRIPT_DIR/docker-compose.nat.yml" build
 
     echo "==> docker: peer images"
-    docker build -f "$SCRIPT_DIR/peers/rust-native/Dockerfile" \
-        -t natwebrtc-peer-rust-native "$SCRIPT_DIR"
-    docker build -f "$SCRIPT_DIR/peers/rust-wasm/Dockerfile" \
-        -t natwebrtc-peer-rust-wasm "$SCRIPT_DIR"
-    docker build -t natwebrtc-peer-js-node "$REPO_ROOT/interop-tests/js-webrtc"
-    docker build -t natwebrtc-peer-js-browser "$SCRIPT_DIR/peers/js-browser"
+    # build_peer <image-tag> <dockerfile> <context>. A peer whose context or
+    # Dockerfile is absent is skipped, never fatal: this rig must not abort just
+    # because an optional peer harness was removed (js-webrtc was deleted).
+    build_peer() {
+        local tag=$1 dockerfile=$2 context=$3
+        if [ ! -f "$dockerfile" ] || [ ! -d "$context" ]; then
+            echo "==> skip $tag (missing $dockerfile or $context)"
+            return 0
+        fi
+        docker build -f "$dockerfile" -t "$tag" "$context"
+    }
 
-    echo "==> done: natwebrtc-peer-{rust-native,rust-wasm,js-node,js-browser}"
+    # Core hole-punch peers first (srflx via coturn): rust-native, rust-wasm and
+    # js-browser. Ordering them ahead of any optional peer guarantees a missing
+    # optional harness can never abort the core rig under `set -e`.
+    build_peer natwebrtc-peer-rust-native "$SCRIPT_DIR/peers/rust-native/Dockerfile" "$SCRIPT_DIR"
+    build_peer natwebrtc-peer-rust-wasm   "$SCRIPT_DIR/peers/rust-wasm/Dockerfile"   "$SCRIPT_DIR"
+    build_peer natwebrtc-peer-js-browser  "$SCRIPT_DIR/peers/js-browser/Dockerfile"  "$SCRIPT_DIR/peers/js-browser"
+
+    echo "==> done: natwebrtc-peer-{rust-native,rust-wasm,js-browser}"
 fi

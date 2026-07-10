@@ -1,9 +1,8 @@
 /**
  * Browser-side js-libp2p private-to-private `/webrtc` interop peer.
  *
- * The node counterpart lives in `interop-tests/js-webrtc/src/index.js`; this
- * variant runs in stock Chrome with the native RTCPeerConnection (no
- * node-datachannel polyfill) and is driven by `driver.mjs` via playwright.
+ * Runs in stock Chrome with the native RTCPeerConnection (no node-datachannel
+ * polyfill) and is driven by `driver.mjs` via playwright.
  *
  * Configuration arrives as query parameters, because a page cannot read env
  * vars:

@@ -10,20 +10,19 @@
 #      peer's netns yields a server-reflexive candidate equal to nat_a's pub
 #      address (MASQUERADE + STUN confirmed).
 #
-# Usage: smoke-peers.sh [peer-type ...]   (default: all four)
+# Usage: smoke-peers.sh [peer-type ...]   (default: all three)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COTURN_IP=172.40.0.10
 NAT_A_PUB=172.40.0.2
 TYPES=("$@")
-[ ${#TYPES[@]} -gt 0 ] || TYPES=(rust-native rust-wasm js-node js-browser)
+[ ${#TYPES[@]} -gt 0 ] || TYPES=(rust-native rust-wasm js-browser)
 
 image_for() {
     case "$1" in
         rust-native) echo natwebrtc-peer-rust-native ;;
         rust-wasm) echo natwebrtc-peer-rust-wasm ;;
-        js-node) echo natwebrtc-peer-js-node ;;
         js-browser) echo natwebrtc-peer-js-browser ;;
         *) echo "unknown peer type: $1" >&2; exit 2 ;;
     esac

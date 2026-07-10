@@ -19,11 +19,8 @@ use std::net::IpAddr;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use libp2p::{
-    Multiaddr, SwarmBuilder, identify, identity,
-    multiaddr::Protocol,
-    noise, relay,
-    swarm::NetworkBehaviour,
-    yamux,
+    Multiaddr, SwarmBuilder, identify, identity, multiaddr::Protocol, noise, relay,
+    swarm::NetworkBehaviour, yamux,
 };
 use tracing_subscriber::EnvFilter;
 

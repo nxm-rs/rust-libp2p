@@ -58,7 +58,11 @@ impl Message {
             },
             Message::IceCandidate(candidate) => SignalingMessage {
                 r#type: Some(SignalingMessageType::IceCandidate as i32),
-                data: candidate,
+                // js-libp2p (@libp2p/webrtc) marks the end of candidates with the JSON
+                // string "null" (`JSON.stringify(null)`), not an absent `data` field.
+                // Emit that spelling so strict receivers interop; the decoder below stays
+                // lenient and still accepts an absent, empty or `"null"` payload.
+                data: Some(candidate.unwrap_or_else(|| "null".to_owned())),
             },
         }
     }
@@ -458,7 +462,13 @@ mod tests {
                 Message::IceCandidate(Some("abc".to_owned())),
                 &[0x07, 0x08, 0x02, 0x12, 0x03, b'a', b'b', b'c'][..],
             ),
-            (Message::IceCandidate(None), &[0x02, 0x08, 0x02][..]),
+            // End-of-candidates carries data="null" (js-libp2p's spelling), so the
+            // proto has both the type field (0x08 0x02) and a 4-byte data string
+            // (0x12 0x04 'n' 'u' 'l' 'l'); message length is 8 → varint prefix 0x08.
+            (
+                Message::IceCandidate(None),
+                &[0x08, 0x08, 0x02, 0x12, 0x04, b'n', b'u', b'l', b'l'][..],
+            ),
         ];
 
         for (message, expected) in fixtures {
@@ -475,6 +485,14 @@ mod tests {
 
     #[test]
     fn end_of_candidates_normalisation() {
+        // Encoder side: end-of-candidates goes out as the JSON string "null" (the
+        // js-libp2p / @libp2p/webrtc spelling), never as an absent `data` field.
+        assert_eq!(
+            Message::IceCandidate(None).into_proto().data.as_deref(),
+            Some("null"),
+        );
+
+        // Receiver side stays lenient: absent, empty and "null" all decode to None.
         for data in [None, Some(String::new()), Some("null".to_owned())] {
             let message = Message::try_from_proto(SignalingMessage {
                 r#type: Some(SignalingMessageType::IceCandidate as i32),
