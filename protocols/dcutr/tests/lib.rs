@@ -20,8 +20,10 @@
 
 use std::time::Duration;
 
+use futures::future::Either as FutureEither;
 use libp2p_core::{
     multiaddr::{Multiaddr, Protocol},
+    muxing::StreamMuxerBox,
     transport::{MemoryTransport, Transport, upgrade::Version},
 };
 use libp2p_dcutr as dcutr;
@@ -29,6 +31,7 @@ use libp2p_identify as identify;
 use libp2p_identity as identity;
 use libp2p_identity::PeerId;
 use libp2p_plaintext as plaintext;
+use libp2p_quic as quic;
 use libp2p_relay as relay;
 use libp2p_swarm::{Config, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p_swarm_test::SwarmExt as _;
@@ -209,4 +212,165 @@ async fn wait_for_reservation(
             e => panic!("{e:?}"),
         }
     }
+}
+
+/// End-to-end DCUtR hole punch over **native QUIC**.
+///
+/// Mirrors [`connect`] but every node speaks QUIC instead of TCP/memory, so it
+/// exercises the QUIC transport's hole-punching path: the destination dials the
+/// relay from its listener socket (`PortUse::Reuse`), the relay observes that
+/// listener port, DCUtR coordinates over the relayed connection and both peers
+/// dial each other's direct QUIC address simultaneously, yielding a direct QUIC
+/// connection. On loopback there is no NAT, so this verifies the coordination +
+/// QUIC simultaneous-open/port-reuse mechanics end to end.
+#[tokio::test]
+async fn connect_quic() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    let mut relay = build_relay_quic();
+    let mut dst = build_client_quic();
+    let mut src = build_client_quic();
+
+    let relay_quic_addr = listen_quic(&mut relay).await;
+    relay.add_external_address(relay_quic_addr.clone());
+    let dst_quic_addr = listen_quic(&mut dst).await;
+    listen_quic(&mut src).await;
+
+    assert!(src.external_addresses().next().is_none());
+    assert!(dst.external_addresses().next().is_none());
+
+    let relay_peer_id = *relay.local_peer_id();
+    let dst_peer_id = *dst.local_peer_id();
+
+    tokio::spawn(relay.loop_on_next());
+
+    let dst_relayed_addr = relay_quic_addr
+        .with(Protocol::P2p(relay_peer_id))
+        .with(Protocol::P2pCircuit)
+        .with(Protocol::P2p(dst_peer_id));
+    dst.listen_on(dst_relayed_addr.clone()).unwrap();
+
+    wait_for_reservation(
+        &mut dst,
+        dst_relayed_addr.clone(),
+        relay_peer_id,
+        false, // No renewal.
+    )
+    .await;
+    tokio::spawn(dst.loop_on_next());
+
+    src.dial_and_wait(dst_relayed_addr.clone()).await;
+
+    let dst_addr = dst_quic_addr.with(Protocol::P2p(dst_peer_id));
+
+    let established_conn_id = src
+        .wait(move |e| match e {
+            SwarmEvent::ConnectionEstablished {
+                endpoint,
+                connection_id,
+                ..
+            } => (*endpoint.get_remote_address() == dst_addr).then_some(connection_id),
+            _ => None,
+        })
+        .await;
+
+    let reported_conn_id = src
+        .wait(move |e| match e {
+            SwarmEvent::Behaviour(ClientEvent::Dcutr(dcutr::Event {
+                result: Ok(connection_id),
+                ..
+            })) => Some(connection_id),
+            _ => None,
+        })
+        .await;
+
+    assert_eq!(established_conn_id, reported_conn_id);
+}
+
+fn build_relay_quic() -> Swarm<Relay> {
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = local_key.public().to_peer_id();
+
+    let transport = quic::tokio::Transport::new(quic::Config::new(&local_key))
+        .map(|(peer, muxer), _| (peer, StreamMuxerBox::new(muxer)))
+        .boxed();
+
+    Swarm::new(
+        transport,
+        Relay {
+            relay: relay::Behaviour::new(
+                local_peer_id,
+                relay::Config {
+                    reservation_duration: Duration::from_secs(2),
+                    ..Default::default()
+                },
+            ),
+            identify: identify::Behaviour::new(identify::Config::new(
+                "/relay".to_owned(),
+                local_key.public(),
+            )),
+        },
+        local_peer_id,
+        Config::with_tokio_executor(),
+    )
+}
+
+fn build_client_quic() -> Swarm<Client> {
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = local_key.public().to_peer_id();
+
+    let (relay_transport, behaviour) = relay::client::new(local_peer_id);
+
+    // Relayed (circuit) connections are raw byte streams and still need to be
+    // authenticated + multiplexed; direct connections use native QUIC, which is
+    // already secure and multiplexed.
+    let relayed = relay_transport
+        .upgrade(Version::V1)
+        .authenticate(plaintext::Config::new(&local_key))
+        .multiplex(libp2p_yamux::Config::default())
+        .map(|(peer, muxer), _| (peer, StreamMuxerBox::new(muxer)));
+
+    let quic = quic::tokio::Transport::new(quic::Config::new(&local_key))
+        .map(|(peer, muxer), _| (peer, StreamMuxerBox::new(muxer)));
+
+    let transport = relayed
+        .or_transport(quic)
+        .map(|either, _| match either {
+            FutureEither::Left(out) => out,
+            FutureEither::Right(out) => out,
+        })
+        .boxed();
+
+    Swarm::new(
+        transport,
+        Client {
+            relay: behaviour,
+            dcutr: dcutr::Behaviour::new(local_peer_id),
+            identify: identify::Behaviour::new(identify::Config::new(
+                "/client".to_owned(),
+                local_key.public(),
+            )),
+        },
+        local_peer_id,
+        Config::with_tokio_executor(),
+    )
+}
+
+async fn listen_quic<B>(swarm: &mut Swarm<B>) -> Multiaddr
+where
+    B: NetworkBehaviour + Send,
+    <B as NetworkBehaviour>::ToSwarm: std::fmt::Debug,
+{
+    swarm
+        .listen_on("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap())
+        .unwrap();
+
+    swarm
+        .wait(|e| match e {
+            SwarmEvent::NewListenAddr { address, .. } => Some(address),
+            _ => None,
+        })
+        .await
 }
