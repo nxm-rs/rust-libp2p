@@ -177,6 +177,9 @@ libp2p-identity = { path = "identity" }
 # Pinned to our own fork carrying the fix from BiagioFesta/wtransport#310 — by rev, on a repo we
 # control, so the ref can't be force-pushed or deleted out from under us.
 # TODO: drop once a wtransport release contains the header-ordering fix.
+# The pinned rev carries the client-side `wtransport::endpoint::connect_over_quic` API (drive the
+# H3/WebTransport handshake over an externally-owned `quinn::Connection`) plus the existing
+# `with_quic_connecting` server hook, so WebTransport rides the shared libp2p-quic `quinn::Endpoint`.
 wtransport = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
 wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
 
