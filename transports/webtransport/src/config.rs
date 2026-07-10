@@ -4,7 +4,7 @@ use quinn::{MtuDiscoveryConfig, VarInt};
 use time::OffsetDateTime;
 use wtransport::config::{QuicTransportConfig, TlsServerConfig};
 
-use crate::certificate::{self, CERT_VALID_PERIOD, CLOCK_SKEW_ALLOWANCE, CertHash, Certificate};
+use crate::certificate::{self, CERT_VALID_PERIOD, CLOCK_SKEW_ALLOWANCE, Certificate};
 
 /// Error returned when constructing a [`Config`] with an invalid certificate set.
 #[derive(Debug, thiserror::Error)]
@@ -16,24 +16,46 @@ pub enum ConfigError {
 
 /// Configuration for the native WebTransport [`Transport`](crate::Transport).
 ///
+/// All fields are private and the type is `#[non_exhaustive]`. Construct a `Config` with
+/// [`Config::new`] (a single certificate), [`Config::new_with_certs`], or [`Config::generate`]
+/// (a current+next pair), then tune it with the chained `mut self -> Self` setters
+/// ([`max_idle_timeout`](Self::max_idle_timeout),
+/// [`keep_alive_interval`](Self::keep_alive_interval), etc.). This mirrors the builder idiom of
+/// `libp2p-quic`'s `Config`.
+///
 /// Beyond the usual QUIC/transport tunables, a `Config` holds an **ordered, non-empty set of
-/// certificates** (`certs`, sorted by `not_before` ascending). Index `0` is the *active*
-/// certificate — the one served in the TLS handshake and advertised first in the listen multiaddr.
-/// The remaining certificates are advertised so dialers can pin a successor ahead of rotation. The
-/// listener manages this set over time, rotating to a fresh certificate before the active one
-/// expires (see [`Transport`](crate::Transport) and [`Self::generate`]).
+/// certificates** (sorted by `not_before` ascending). Index `0` is the *active* certificate — the
+/// one served in the TLS handshake and advertised first in the listen multiaddr. The remaining
+/// certificates are advertised so dialers can pin a successor ahead of rotation. The listener
+/// manages this set over time, rotating to a fresh certificate before the active one expires (see
+/// [`Transport`](crate::Transport) and [`Self::generate`]).
+///
+/// `Config` deliberately does **not** implement `Debug`: it holds the libp2p `keypair` and the
+/// certificate private keys, which must not be logged.
+#[derive(Clone)]
+#[non_exhaustive]
 pub struct Config {
-    pub max_idle_timeout: u32,
-    pub max_concurrent_stream_limit: u32,
-    pub keep_alive_interval: Duration,
-    pub max_connection_data: u32,
-    pub max_stream_data: u32,
-    pub mtu_discovery_config: MtuDiscoveryConfig,
-    /// Timeout for the initial handshake when establishing a connection.
-    /// The actual timeout is the minimum of this and the [`Config::max_idle_timeout`].
-    pub handshake_timeout: Duration,
-    /// Libp2p identity of the node.
-    pub keypair: libp2p_identity::Keypair,
+    /// Maximum idle time in **milliseconds** before a connection is closed. `0` means *infinite*
+    /// (quinn never times the connection out on idle); set this with care, as a stuck peer then
+    /// holds the connection open indefinitely.
+    max_idle_timeout: u32,
+    /// Maximum number of concurrent inbound bidirectional streams.
+    max_concurrent_stream_limit: u32,
+    /// Period between keep-alive packets.
+    keep_alive_interval: Duration,
+    /// Connection-level flow-control receive window, in **bytes**.
+    max_connection_data: u32,
+    /// Per-stream flow-control receive window, in **bytes**.
+    max_stream_data: u32,
+    /// Path-MTU-discovery configuration. `None` disables discovery; `Some(_)` enables it (this is
+    /// the default).
+    mtu_discovery_config: Option<MtuDiscoveryConfig>,
+    /// Timeout for the initial handshake when establishing a connection. `pub(crate)` so the
+    /// listener/dialer can read it; not part of the public API.
+    pub(crate) handshake_timeout: Duration,
+    /// Libp2p identity of the node. `pub(crate)` so the transport can read it; not part of the
+    /// public API.
+    pub(crate) keypair: libp2p_identity::Keypair,
 
     /// Ordered, non-empty certificate set, sorted by `not_before` ascending. `certs[0]` is the
     /// active (served) certificate.
@@ -101,7 +123,8 @@ impl Config {
         let max_connection_data = 15_000_000;
         // Ensure that one stream is not consuming the whole connection.
         let max_stream_data = 10_000_000;
-        let mtu_discovery_config = Default::default();
+        // Path-MTU discovery is on by default (mirrors `quic::Config`).
+        let mtu_discovery_config = Some(MtuDiscoveryConfig::default());
 
         Self {
             max_idle_timeout,
@@ -116,6 +139,59 @@ impl Config {
         }
     }
 
+    /// Set the maximum idle time in **milliseconds** before a connection is closed.
+    ///
+    /// A value of `0` means *infinite* (quinn never closes the connection on idle); use with care.
+    pub fn max_idle_timeout(mut self, millis: u32) -> Self {
+        self.max_idle_timeout = millis;
+        self
+    }
+
+    /// Set the period between keep-alive packets.
+    pub fn keep_alive_interval(mut self, interval: Duration) -> Self {
+        self.keep_alive_interval = interval;
+        self
+    }
+
+    /// Set the maximum number of concurrent inbound bidirectional streams.
+    pub fn max_concurrent_stream_limit(mut self, limit: u32) -> Self {
+        self.max_concurrent_stream_limit = limit;
+        self
+    }
+
+    /// Set the per-stream flow-control receive window, in **bytes**.
+    pub fn max_stream_data(mut self, bytes: u32) -> Self {
+        self.max_stream_data = bytes;
+        self
+    }
+
+    /// Set the connection-level flow-control receive window, in **bytes**.
+    pub fn max_connection_data(mut self, bytes: u32) -> Self {
+        self.max_connection_data = bytes;
+        self
+    }
+
+    /// Set the timeout for the initial connection handshake.
+    pub fn handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+
+    /// Set the upper bound for path-MTU discovery, re-enabling discovery if it was previously
+    /// disabled via [`disable_path_mtu_discovery`](Self::disable_path_mtu_discovery).
+    pub fn mtu_upper_bound(mut self, value: u16) -> Self {
+        self.mtu_discovery_config
+            .get_or_insert_with(MtuDiscoveryConfig::default)
+            .upper_bound(value);
+        self
+    }
+
+    /// Disable path-MTU discovery.
+    pub fn disable_path_mtu_discovery(mut self) -> Self {
+        self.mtu_discovery_config = None;
+        self
+    }
+
     /// The active (served) certificate, i.e. `certs[0]`.
     pub fn active_cert(&self) -> &Certificate {
         &self.certs[0]
@@ -127,15 +203,20 @@ impl Config {
     }
 
     /// Derives the TLS server config from the active certificate only.
-    pub fn server_tls_config(&self) -> TlsServerConfig {
+    ///
+    /// `pub(crate)`: it returns a `wtransport`/`rustls` type and is an internal listener seam.
+    pub(crate) fn server_tls_config(&self) -> TlsServerConfig {
         libp2p_tls::make_webtransport_server_config(
-            self.active_cert().get_certificate_der(),
-            &self.active_cert().get_private_key_der(),
+            self.active_cert().certificate_der(),
+            &self.active_cert().private_key_der(),
             alpn_protocols(),
         )
     }
 
-    pub fn get_quic_transport_config(&self) -> QuicTransportConfig {
+    /// Builds the quinn transport config from the current tunables.
+    ///
+    /// `pub(crate)`: it returns a `quinn` type and is an internal listener seam.
+    pub(crate) fn get_quic_transport_config(&self) -> QuicTransportConfig {
         self.quic_params().build()
     }
 
@@ -157,7 +238,11 @@ impl Config {
     /// This maps over the **entire** certificate set. The listener splits the result into the
     /// multiaddr set (current + next) and the Noise set (which may additionally include a
     /// recently-expired hash); see [`Transport`](crate::Transport).
-    pub fn cert_hashes(&self) -> Vec<CertHash> {
+    ///
+    /// `pub(crate)`: an internal seam. The listener computes its advertised hashes directly from
+    /// its own certificate set during rotation, so this is currently used only by tests.
+    #[cfg(test)]
+    pub(crate) fn cert_hashes(&self) -> Vec<crate::certificate::CertHash> {
         self.certs.iter().map(|c| c.cert_hash()).collect()
     }
 }
@@ -178,7 +263,7 @@ pub(crate) struct QuicParams {
     max_idle_timeout: u32,
     max_stream_data: u32,
     max_connection_data: u32,
-    mtu_discovery_config: MtuDiscoveryConfig,
+    mtu_discovery_config: Option<MtuDiscoveryConfig>,
 }
 
 impl QuicParams {
@@ -196,7 +281,7 @@ impl QuicParams {
         res.allow_spin(true);
         res.stream_receive_window(self.max_stream_data.into());
         res.receive_window(self.max_connection_data.into());
-        res.mtu_discovery_config(Some(self.mtu_discovery_config.clone()));
+        res.mtu_discovery_config(self.mtu_discovery_config.clone());
 
         res
     }
@@ -297,5 +382,94 @@ mod tests {
         for cert in config.certs() {
             assert!(cert.not_after() - cert.not_before() < Duration::days(14));
         }
+    }
+
+    fn single_cert_config() -> Config {
+        let cert = Certificate::generate(datetime!(2025-08-08 0:00 UTC)).unwrap();
+        Config::new(&keypair(), cert)
+    }
+
+    // CFG9: `new` fills the documented defaults, including MTU discovery on.
+    #[test]
+    fn new_has_documented_defaults() {
+        let config = single_cert_config();
+        assert_eq!(config.max_idle_timeout, 30_000);
+        assert_eq!(config.max_concurrent_stream_limit, 256);
+        assert_eq!(
+            config.keep_alive_interval,
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(config.max_connection_data, 15_000_000);
+        assert_eq!(config.max_stream_data, 10_000_000);
+        assert_eq!(config.handshake_timeout, std::time::Duration::from_secs(5));
+        assert!(config.mtu_discovery_config.is_some());
+    }
+
+    // CFG10: chained setters apply and override defaults.
+    #[test]
+    fn setters_chain_and_override() {
+        let config = single_cert_config()
+            .max_idle_timeout(1234)
+            .keep_alive_interval(std::time::Duration::from_secs(7))
+            .max_concurrent_stream_limit(9)
+            .max_stream_data(111)
+            .max_connection_data(222)
+            .handshake_timeout(std::time::Duration::from_secs(3));
+
+        assert_eq!(config.max_idle_timeout, 1234);
+        assert_eq!(
+            config.keep_alive_interval,
+            std::time::Duration::from_secs(7)
+        );
+        assert_eq!(config.max_concurrent_stream_limit, 9);
+        assert_eq!(config.max_stream_data, 111);
+        assert_eq!(config.max_connection_data, 222);
+        assert_eq!(config.handshake_timeout, std::time::Duration::from_secs(3));
+    }
+
+    // CFG11: disable_path_mtu_discovery sets the field to None; get_quic_transport_config still
+    // builds without panicking.
+    #[test]
+    fn disable_path_mtu_discovery_sets_none() {
+        let config = single_cert_config().disable_path_mtu_discovery();
+        assert!(config.mtu_discovery_config.is_none());
+        // Building the quinn transport config must not panic on the disabled path.
+        let _ = config.get_quic_transport_config();
+    }
+
+    // CFG12: mtu_upper_bound re-enables discovery after it was disabled (no panic on a None field).
+    #[test]
+    fn mtu_upper_bound_inserts_default_when_disabled_then_set() {
+        let config = single_cert_config()
+            .disable_path_mtu_discovery()
+            .mtu_upper_bound(1400);
+        assert!(config.mtu_discovery_config.is_some());
+        let _ = config.get_quic_transport_config();
+    }
+
+    // CFG13: Config is Clone and the clone preserves tunables.
+    #[test]
+    fn config_is_clone() {
+        let config = single_cert_config().max_idle_timeout(4242);
+        let clone = config.clone();
+        assert_eq!(clone.max_idle_timeout, 4242);
+        assert_eq!(clone.certs().len(), config.certs().len());
+    }
+
+    // CFG14: get_quic_transport_config builds without panic on the default (MTU enabled) path and
+    // is pub(crate)-callable.
+    #[test]
+    fn get_quic_transport_config_reflects_setters() {
+        let config = single_cert_config().max_stream_data(4096);
+        let _ = config.get_quic_transport_config();
+    }
+
+    // CFG15: cert_hashes yields a single SHA-256 multihash for a one-cert config.
+    #[test]
+    fn cert_hashes_single_sha256() {
+        let config = single_cert_config();
+        let hashes = config.cert_hashes();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].digest().len(), 32);
     }
 }

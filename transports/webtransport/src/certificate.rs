@@ -1,6 +1,6 @@
 use std::{
     io,
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read},
 };
 
 use libp2p_core::multihash::Multihash;
@@ -15,6 +15,15 @@ use zeroize::Zeroizing;
 static SIGNATURE_ALGORITHM: &rcgen::SignatureAlgorithm = &rcgen::PKCS_ECDSA_P256_SHA256;
 
 pub(crate) const MULTIHASH_SHA256_CODE: u64 = 0x12;
+
+/// Version of the [`Certificate::to_bytes`] / [`Certificate::parse`] serialization format.
+///
+/// The serialized form begins with this single byte. [`Certificate::parse`] reads it first and
+/// rejects any other value with [`Error::UnsupportedVersion`], so the format can evolve in a future
+/// release without silently misparsing an old blob. This is a **compatibility discriminator, not an
+/// integrity check**: the serialized blob carries the private key in the clear and is not
+/// authenticated.
+pub const SERIALIZATION_VERSION: u8 = 1;
 
 /// Upper bound on each length-prefixed field accepted by [`Certificate::parse`].
 ///
@@ -40,14 +49,6 @@ pub(crate) const CERT_VALID_PERIOD: Duration = Duration::days(13);
 
 pub type CertHash = Multihash<64>;
 
-// I would like to avoid interacting with the file system as much as possible.
-// My suggestion would be:
-// - libp2p::webtransport::Transport::new takes a list of certificates (of type
-//   libp2p::webtransport::Certificate)
-// - libp2p::webtransport::Certificate::generate allows users generate a new certificate with
-//   certain parameters (validity date etc)
-// - libp2p::webtransport::Certificate::{parse,to_bytes} allow users to serialize and deserialize
-//   certificates
 /// A self-signed WebTransport server certificate together with its private key and validity
 /// window.
 ///
@@ -58,7 +59,7 @@ pub type CertHash = Multihash<64>;
 pub struct Certificate {
     der: CertificateDer<'static>,
     /// PKCS#8-encoded private key bytes. Held in a zeroizing buffer so the secret is wiped on
-    /// drop; reconstruct a borrowed [`PrivateKeyDer`] via [`Self::get_private_key_der`].
+    /// drop; reconstruct a borrowed [`PrivateKeyDer`] via [`Self::private_key_der`].
     private_key_pkcs8: Zeroizing<Vec<u8>>,
     not_before: OffsetDateTime,
     not_after: OffsetDateTime,
@@ -80,67 +81,35 @@ impl std::fmt::Debug for Certificate {
 ///
 /// This enum is `#[non_exhaustive]`: the crate is unreleased and may add further variants without
 /// a breaking change, so downstream `match`es must include a wildcard arm.
-#[derive(Debug)]
+///
+/// It is re-exported at the crate root as [`CertificateError`](crate::CertificateError).
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-// `GenError`/`IoError` are pre-existing public variant names; keep them for API stability rather
-// than renaming to satisfy the variant-name lint.
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     /// Certificate generation (rcgen) failed.
-    GenError(rcgen::Error),
+    #[error(transparent)]
+    Generate(#[from] rcgen::Error),
     /// An I/O error occurred while reading the serialised representation (e.g. the buffer ended
     /// before a length-prefixed field was fully read).
-    IoError(io::Error),
-    /// A length-prefixed field was negative or larger than `MAX_FIELD_LEN`.
+    #[error("I/O error parsing certificate: {0}")]
+    Io(#[from] io::Error),
+    /// The leading version byte did not match [`SERIALIZATION_VERSION`]. The payload is the version
+    /// byte found in the input; this build only supports [`SERIALIZATION_VERSION`].
+    #[error("unsupported certificate serialization version: {0}")]
+    UnsupportedVersion(u8),
+    /// A length-prefixed field was larger than `MAX_FIELD_LEN`.
+    #[error("length-prefixed field exceeded the maximum")]
     InvalidLength,
     /// The private-key bytes were not a recognised DER private key.
+    #[error("private-key bytes were not a valid DER key")]
     InvalidPrivateKey,
-    /// A `not_before`/`not_after` unix timestamp was outside the representable range.
+    /// A `not_before`/`not_after` unix timestamp was outside the representable range, or
+    /// `not_after` was not strictly after `not_before`.
+    #[error("certificate timestamp was out of range or mis-ordered")]
     InvalidTimestamp,
     /// Bytes remained after a complete certificate was parsed (non-canonical encoding).
+    #[error("trailing bytes after a complete certificate")]
     TrailingData,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::GenError(e) => write!(f, "certificate generation failed: {e}"),
-            Error::IoError(e) => write!(f, "I/O error parsing certificate: {e}"),
-            Error::InvalidLength => {
-                write!(
-                    f,
-                    "length-prefixed field was negative or exceeded the maximum"
-                )
-            }
-            Error::InvalidPrivateKey => write!(f, "private-key bytes were not a valid DER key"),
-            Error::InvalidTimestamp => {
-                write!(f, "certificate timestamp was out of representable range")
-            }
-            Error::TrailingData => write!(f, "trailing bytes after a complete certificate"),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::GenError(e) => Some(e),
-            Error::IoError(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<rcgen::Error> for Error {
-    fn from(value: rcgen::Error) -> Self {
-        Self::GenError(value)
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(value: io::Error) -> Self {
-        Self::IoError(value)
-    }
 }
 
 impl Clone for Certificate {
@@ -229,11 +198,16 @@ impl Certificate {
         self.not_after
     }
 
-    pub fn get_certificate_der(&self) -> CertificateDer<'static> {
+    /// The certificate's DER-encoded bytes.
+    pub fn certificate_der(&self) -> CertificateDer<'static> {
         self.der.clone()
     }
 
-    pub fn get_private_key_der(&self) -> PrivateKeyDer<'_> {
+    /// A borrowed view of the PKCS#8 DER-encoded private key.
+    ///
+    /// **Sensitive:** the returned value borrows the in-memory private key. Do not log it or copy
+    /// it into a buffer that is not zeroized.
+    pub fn private_key_der(&self) -> PrivateKeyDer<'_> {
         PrivateKeyDer::from(PrivatePkcs8KeyDer::from(self.private_key_pkcs8.as_slice()))
     }
 
@@ -247,25 +221,32 @@ impl Certificate {
 
     /// Serializes the certificate, its private key, and validity window to bytes.
     ///
+    /// # Format
+    ///
+    /// All integers are big-endian. The blob begins with a single version byte
+    /// ([`SERIALIZATION_VERSION`]):
+    ///
+    /// ```text
+    /// [u8 version][u64 len][cert DER][u64 len][key PKCS#8 DER][i64 not_before][i64 not_after]
+    /// ```
+    ///
+    /// This is **not** a cross-implementation interchange format; it round-trips only with
+    /// [`Self::parse`] of a compatible build.
+    ///
     /// **Sensitive:** the returned buffer contains the raw private key material in the clear. The
     /// caller is responsible for protecting and zeroizing it (the buffer is a plain `Vec<u8>` and
-    /// is *not* zeroized on drop).
-    ///
-    /// The `.expect()`s below are infallible: every write targets an in-memory `Vec<u8>`, whose
-    /// `io::Write` impl never returns an error (it grows to fit). They are not reachable from any
-    /// input.
+    /// is *not* zeroized on drop). Persist it with filesystem-level confidentiality (mode `0600` or
+    /// a secret store).
     pub fn to_bytes(&self) -> Vec<u8> {
+        // Writing to a `Vec<u8>` is infallible (it grows to fit), so this never errors; we build it
+        // directly with `extend_from_slice`/`push`.
         let mut bytes = Vec::new();
 
-        Self::write_data(&mut bytes, self.der.as_ref()).expect("Write cert data");
-        Self::write_data(&mut bytes, self.private_key_pkcs8.as_slice())
-            .expect("Write private_key data");
-
-        let nb_buff = self.not_before.unix_timestamp().to_be_bytes();
-        std::io::Write::write(&mut bytes, &nb_buff).expect("Write not_before");
-
-        let na_buff = self.not_after.unix_timestamp().to_be_bytes();
-        std::io::Write::write(&mut bytes, &na_buff).expect("Write not_after");
+        bytes.push(SERIALIZATION_VERSION);
+        Self::push_data(&mut bytes, self.der.as_ref());
+        Self::push_data(&mut bytes, self.private_key_pkcs8.as_slice());
+        bytes.extend_from_slice(&self.not_before.unix_timestamp().to_be_bytes());
+        bytes.extend_from_slice(&self.not_after.unix_timestamp().to_be_bytes());
 
         bytes
     }
@@ -275,19 +256,40 @@ impl Certificate {
     /// # Untrusted input
     ///
     /// This is a `pub` deserialiser, so the input bytes are treated as fully untrusted. `parse`
-    /// guarantees it **never panics and never makes an unbounded allocation**: every length prefix
-    /// is checked against `MAX_FIELD_LEN` (64 KiB) *before* allocating, all fallible steps return
-    /// [`Error`] rather than unwrapping, and the encoding is canonical (trailing bytes are rejected
-    /// as [`Error::TrailingData`]).
+    /// guarantees it **never panics and never makes an unbounded allocation**: the leading version
+    /// byte is validated against [`SERIALIZATION_VERSION`] first, every length prefix is checked
+    /// against `MAX_FIELD_LEN` (64 KiB) *before* allocating, all fallible steps return [`Error`]
+    /// rather than unwrapping, and the encoding is canonical (trailing bytes are rejected as
+    /// [`Error::TrailingData`]).
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::UnsupportedVersion`] — the leading byte is not [`SERIALIZATION_VERSION`]. A blob
+    ///   written by an older, unversioned build is rejected here because its first byte is read as
+    ///   a version that does not equal [`SERIALIZATION_VERSION`]. Regenerate the certificate.
+    /// * [`Error::Io`] — the input was truncated.
+    /// * [`Error::InvalidLength`] — a length prefix exceeded `MAX_FIELD_LEN`.
+    /// * [`Error::InvalidPrivateKey`] — the key block was not a recognised DER private key.
+    /// * [`Error::InvalidTimestamp`] — a timestamp was out of range, or `not_after <= not_before`.
+    /// * [`Error::TrailingData`] — bytes remained after a complete certificate.
     ///
     /// # Non-guarantees
     ///
-    /// A successfully-parsed [`Certificate`] is **not** semantically validated: `parse` does not
-    /// check `not_before <= not_after`, and [`CertificateDer`] performs no structural DER
-    /// validation. Callers must not treat a successful parse as proof of a well-formed or currently
-    /// valid certificate.
+    /// A successfully-parsed [`Certificate`] is **not** fully validated: `parse` checks the
+    /// timestamp ordering (`not_after > not_before`) but performs no structural DER validation and
+    /// does **not** verify that the private key corresponds to the certificate (the blob already
+    /// carries the cleartext key, so it is assumed self-consistent). Callers must not treat a
+    /// successful parse as proof of a currently valid certificate.
     pub fn parse(data: &[u8]) -> Result<Self, Error> {
         let mut cursor = Cursor::new(data);
+
+        // The version byte gates the rest of the format. An old, unversioned blob whose first byte
+        // is not `SERIALIZATION_VERSION` is rejected here.
+        let version = Self::read_u8(&mut cursor)?;
+        if version != SERIALIZATION_VERSION {
+            return Err(Error::UnsupportedVersion(version));
+        }
+
         let cert_data = Self::read_data(&mut cursor)?;
         let private_key_data = Self::read_data(&mut cursor)?;
         let nb = Self::read_i64(&mut cursor)?;
@@ -307,6 +309,12 @@ impl Certificate {
             OffsetDateTime::from_unix_timestamp(nb).map_err(|_| Error::InvalidTimestamp)?;
         let not_after =
             OffsetDateTime::from_unix_timestamp(na).map_err(|_| Error::InvalidTimestamp)?;
+        // Reject a mis-ordered validity window. (We do not enforce the <=14-day ceiling here: that
+        // would reject our own validly-minted certs as they age, and is a `generate`-time
+        // guarantee instead.)
+        if not_after <= not_before {
+            return Err(Error::InvalidTimestamp);
+        }
 
         Ok(Self {
             der: cert,
@@ -316,14 +324,11 @@ impl Certificate {
         })
     }
 
-    fn write_data<W: Write>(w: &mut W, data: &[u8]) -> Result<(), io::Error> {
-        let size = data.len() as u64;
-        let size_buf = size.to_be_bytes();
-
-        w.write_all(&size_buf)?;
-        w.write_all(data)?;
-
-        Ok(())
+    /// Append a single length-prefixed field (`[u64 BE len][bytes]`) to `out`. Infallible: writing
+    /// to a `Vec<u8>` never fails.
+    fn push_data(out: &mut Vec<u8>, data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u64).to_be_bytes());
+        out.extend_from_slice(data);
     }
 
     /// Reads a single length-prefixed field, bounding the declared length against `MAX_FIELD_LEN`
@@ -342,6 +347,13 @@ impl Certificate {
         r.read_exact(res.as_mut_slice())?;
 
         Ok(res)
+    }
+
+    fn read_u8<R: Read>(r: &mut R) -> Result<u8, io::Error> {
+        let mut buffer = [0u8; 1];
+        r.read_exact(&mut buffer)?;
+
+        Ok(buffer[0])
     }
 
     fn read_u64<R: Read>(r: &mut R) -> Result<u64, io::Error> {
@@ -365,12 +377,14 @@ mod tests {
 
     use time::macros::datetime;
 
-    use super::{Certificate, Error, MAX_FIELD_LEN};
+    use super::{Certificate, Error, MAX_FIELD_LEN, SERIALIZATION_VERSION};
 
     /// Build a serialised certificate body from raw parts, mirroring `to_bytes`' on-wire layout
-    /// (`u64-len || bytes` twice, then two `i64` timestamps). Used to craft malformed inputs.
+    /// (`[u8 version]` then `u64-len || bytes` twice, then two `i64` timestamps). Used to craft
+    /// malformed inputs. Prepends a valid version byte so callers exercise the post-version path.
     fn encode(cert: &[u8], key: &[u8], not_before: i64, not_after: i64) -> Vec<u8> {
         let mut out = Vec::new();
+        out.push(SERIALIZATION_VERSION);
         out.extend_from_slice(&(cert.len() as u64).to_be_bytes());
         out.extend_from_slice(cert);
         out.extend_from_slice(&(key.len() as u64).to_be_bytes());
@@ -383,88 +397,120 @@ mod tests {
     /// A valid PKCS#8 private key (DER) lifted from a freshly generated certificate.
     fn valid_key() -> Vec<u8> {
         let cert = Certificate::generate(datetime!(2025-08-08 0:00 UTC)).unwrap();
-        // Pull the key bytes back out via the serialised form.
+        // Pull the key bytes back out via the serialised form (skip the leading version byte).
         let bytes = cert.to_bytes();
-        let cert_len = u64::from_be_bytes(bytes[0..8].try_into().unwrap()) as usize;
-        let key_off = 8 + cert_len;
+        let cert_len = u64::from_be_bytes(bytes[1..9].try_into().unwrap()) as usize;
+        let key_off = 9 + cert_len;
         let key_len = u64::from_be_bytes(bytes[key_off..key_off + 8].try_into().unwrap()) as usize;
         bytes[key_off + 8..key_off + 8 + key_len].to_vec()
     }
 
-    // B3: empty input → IoError (first length prefix cannot be read).
-    #[test]
-    fn parse_empty_is_io_error() {
-        assert!(matches!(Certificate::parse(&[]), Err(Error::IoError(_))));
+    /// Prepend the valid version byte to a raw post-version body, so tests can target the
+    /// length/timestamp parsing without each repeating the version prefix.
+    fn versioned(body: &[u8]) -> Vec<u8> {
+        let mut out = vec![SERIALIZATION_VERSION];
+        out.extend_from_slice(body);
+        out
     }
 
-    // B3: truncated in the middle of the first length prefix → IoError.
+    // empty input → Io (the version byte cannot even be read).
+    #[test]
+    fn parse_empty_is_io_error() {
+        assert!(matches!(Certificate::parse(&[]), Err(Error::Io(_))));
+    }
+
+    // a wrong leading version byte → UnsupportedVersion (carrying the byte found).
+    #[test]
+    fn parse_rejects_wrong_version() {
+        assert!(matches!(
+            Certificate::parse(&[0x02]),
+            Err(Error::UnsupportedVersion(2))
+        ));
+    }
+
+    // version byte 0 (also the first byte of a legacy unversioned blob) → UnsupportedVersion(0).
+    #[test]
+    fn parse_rejects_version_zero() {
+        assert!(matches!(
+            Certificate::parse(&[0x00, 0x00, 0x00]),
+            Err(Error::UnsupportedVersion(0))
+        ));
+    }
+
+    // truncated in the middle of the first length prefix → Io.
     #[test]
     fn parse_truncated_first_length_is_io_error() {
         assert!(matches!(
-            Certificate::parse(&[0, 0, 0]),
-            Err(Error::IoError(_))
+            Certificate::parse(&versioned(&[0, 0, 0])),
+            Err(Error::Io(_))
         ));
     }
 
-    // B3: a declared cert body that is not fully present → IoError.
+    // a declared cert body that is not fully present → Io.
     #[test]
     fn parse_truncated_cert_body_is_io_error() {
-        let mut data = (4u64).to_be_bytes().to_vec();
-        data.extend_from_slice(&[1, 2]); // claims 4 bytes, only 2 present
-        assert!(matches!(Certificate::parse(&data), Err(Error::IoError(_))));
+        let mut body = (4u64).to_be_bytes().to_vec();
+        body.extend_from_slice(&[1, 2]); // claims 4 bytes, only 2 present
+        assert!(matches!(
+            Certificate::parse(&versioned(&body)),
+            Err(Error::Io(_))
+        ));
     }
 
-    // B3: well-formed cert+key but truncated before the timestamps → IoError.
+    // well-formed cert+key but truncated before the timestamps → Io.
     #[test]
     fn parse_truncated_before_timestamps_is_io_error() {
         let key = valid_key();
-        let mut data = Vec::new();
-        data.extend_from_slice(&(1u64).to_be_bytes());
-        data.push(0xAA);
-        data.extend_from_slice(&(key.len() as u64).to_be_bytes());
-        data.extend_from_slice(&key);
+        let mut body = Vec::new();
+        body.extend_from_slice(&(1u64).to_be_bytes());
+        body.push(0xAA);
+        body.extend_from_slice(&(key.len() as u64).to_be_bytes());
+        body.extend_from_slice(&key);
         // No timestamp bytes at all.
-        assert!(matches!(Certificate::parse(&data), Err(Error::IoError(_))));
+        assert!(matches!(
+            Certificate::parse(&versioned(&body)),
+            Err(Error::Io(_))
+        ));
     }
 
-    // B3 [T2, highest severity]: an oversized (i64::MAX) length prefix is rejected BEFORE any large
-    // allocation. The crafted input is only 8 bytes — we never pre-build a huge buffer (F10).
+    // [T2, highest severity]: an oversized (i64::MAX) length prefix is rejected BEFORE any large
+    // allocation. The crafted input is tiny — we never pre-build a huge buffer (F10).
     #[test]
     fn parse_oversized_length_is_invalid_length() {
-        let data = i64::MAX.to_be_bytes(); // == u64 0x7FFF_FFFF_FFFF_FFFF
+        let data = versioned(&i64::MAX.to_be_bytes()); // == u64 0x7FFF_FFFF_FFFF_FFFF
         assert!(matches!(
             Certificate::parse(&data),
             Err(Error::InvalidLength)
         ));
     }
 
-    // B3: a "negative" length (-1 as i64 == u64::MAX) is rejected as InvalidLength, guarding the
-    // old `as usize` wraparound. Only an 8-byte input.
+    // a "negative" length (-1 as i64 == u64::MAX) is rejected as InvalidLength, guarding the old
+    // `as usize` wraparound.
     #[test]
     fn parse_negative_length_is_invalid_length() {
-        let data = (-1i64).to_be_bytes(); // == u64::MAX
+        let data = versioned(&(-1i64).to_be_bytes()); // == u64::MAX
         assert!(matches!(
             Certificate::parse(&data),
             Err(Error::InvalidLength)
         ));
     }
 
-    // B3: a length of MAX_FIELD_LEN + 1 is InvalidLength (exclusive upper bound). 8-byte input.
+    // a length of MAX_FIELD_LEN + 1 is InvalidLength (exclusive upper bound).
     #[test]
     fn parse_length_above_cap_is_invalid_length() {
-        let data = ((MAX_FIELD_LEN + 1) as u64).to_be_bytes();
+        let data = versioned(&((MAX_FIELD_LEN + 1) as u64).to_be_bytes());
         assert!(matches!(
             Certificate::parse(&data),
             Err(Error::InvalidLength)
         ));
     }
 
-    // B3: a length of exactly MAX_FIELD_LEN is NOT rejected by the cap (it then fails later, on the
-    // missing body, as IoError — proving the boundary is inclusive of MAX_FIELD_LEN).
+    // a length of exactly MAX_FIELD_LEN is NOT rejected by the cap (it then fails later, on the
+    // missing body, as Io — proving the boundary is inclusive of MAX_FIELD_LEN).
     #[test]
     fn parse_length_at_cap_is_not_invalid_length() {
-        let data = (MAX_FIELD_LEN as u64).to_be_bytes();
-        assert!(matches!(Certificate::parse(&data), Err(Error::IoError(_))));
+        let data = versioned(&(MAX_FIELD_LEN as u64).to_be_bytes());
+        assert!(matches!(Certificate::parse(&data), Err(Error::Io(_))));
     }
 
     // B3: a valid cert body but an empty/garbage private key → InvalidPrivateKey.
@@ -508,7 +554,44 @@ mod tests {
         assert_eq!(parsed.not_before().unix_timestamp(), -100);
     }
 
-    // B3: trailing bytes after a complete certificate → TrailingData.
+    // a mis-ordered validity window (not_after <= not_before) → InvalidTimestamp.
+    #[test]
+    fn parse_rejects_not_after_le_not_before() {
+        let key = valid_key();
+
+        let equal = encode(&[0x30, 0x00], &key, 100, 100);
+        assert!(matches!(
+            Certificate::parse(&equal),
+            Err(Error::InvalidTimestamp)
+        ));
+
+        let reversed = encode(&[0x30, 0x00], &key, 100, 50);
+        assert!(matches!(
+            Certificate::parse(&reversed),
+            Err(Error::InvalidTimestamp)
+        ));
+    }
+
+    // to_bytes begins with the serialization version byte.
+    #[test]
+    fn to_bytes_starts_with_version_byte() {
+        let cert = Certificate::generate(datetime!(2025-08-08 0:00 UTC)).unwrap();
+        assert_eq!(cert.to_bytes()[0], SERIALIZATION_VERSION);
+    }
+
+    // The Debug impl must never leak the private key bytes.
+    #[test]
+    fn debug_does_not_leak_private_key() {
+        let cert = Certificate::generate(datetime!(2025-08-08 0:00 UTC)).unwrap();
+        let dbg = format!("{cert:?}");
+        let key = valid_key();
+        // The redaction placeholder is present and no run of key bytes appears.
+        assert!(dbg.contains("<redacted>"));
+        let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!dbg.contains(&key_hex));
+    }
+
+    // trailing bytes after a complete certificate → TrailingData.
     #[test]
     fn parse_trailing_data_rejected() {
         let cert = Certificate::generate(datetime!(2025-08-08 0:00 UTC)).unwrap();
@@ -528,18 +611,20 @@ mod tests {
         assert_eq!(parsed, cert);
     }
 
-    // B3: Display is non-empty for every variant and source() is Some only for the wrapping ones.
+    // Display is non-empty for every variant and source() is Some only for the wrapping ones.
     #[test]
     fn error_display_and_source() {
-        let io = Error::IoError(std::io::Error::other("boom"));
+        let io = Error::Io(std::io::Error::other("boom"));
         assert!(!io.to_string().is_empty());
         assert!(io.source().is_some());
 
-        let gen_err = Error::GenError(rcgen::Error::CouldNotParseCertificate);
+        // `Generate` is `#[error(transparent)]`: its Display *is* the rcgen error's, so the message
+        // is non-empty.
+        let gen_err = Error::Generate(rcgen::Error::CouldNotParseCertificate);
         assert!(!gen_err.to_string().is_empty());
-        assert!(gen_err.source().is_some());
 
         for e in [
+            Error::UnsupportedVersion(7),
             Error::InvalidLength,
             Error::InvalidPrivateKey,
             Error::InvalidTimestamp,

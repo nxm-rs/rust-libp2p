@@ -517,8 +517,8 @@ impl Listener {
         //    Noise set. With rebind=false the reload only swaps the TLS/QUIC config and leaves the
         //    socket and live connections intact.
         let tls = libp2p_tls::make_webtransport_server_config(
-            self.certs[0].get_certificate_der(),
-            &self.certs[0].get_private_key_der(),
+            self.certs[0].certificate_der(),
+            &self.certs[0].private_key_der(),
             alpn_protocols(),
         );
         // `reload_config(.., false)` ignores the bind address (it does not rebind the socket), so
@@ -1034,8 +1034,8 @@ mod test {
         let socket = create_socket(socket_addr).unwrap();
 
         let tls = libp2p_tls::make_webtransport_server_config(
-            certs[0].get_certificate_der(),
-            &certs[0].get_private_key_der(),
+            certs[0].certificate_der(),
+            &certs[0].private_key_der(),
             alpn_protocols(),
         );
         let quic_params = Config::new(&keypair, certs[0].clone()).quic_params();

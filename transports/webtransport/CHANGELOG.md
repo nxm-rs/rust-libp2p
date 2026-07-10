@@ -32,6 +32,30 @@
   - No wire/multiaddr format change. `poll_read` only *fixes* read behaviour; `listen_on` only newly
     *rejects* foreign-`/p2p/` (and doubled-`/p2p/`) listen addresses.
 
+- Public-API stabilization ahead of the initial publish (crate is unreleased; pre-release
+  reshaping, not released breaking changes):
+
+  - **`Config` is now a builder.** All fields are private and the type is `#[non_exhaustive]` and
+    `Clone`. Construct via `Config::new` / `new_with_certs` / `generate`, then tune with chained
+    `mut self -> Self` setters: `max_idle_timeout` (ms; `0` = infinite), `keep_alive_interval`,
+    `max_concurrent_stream_limit`, `max_stream_data` (bytes), `max_connection_data` (bytes),
+    `handshake_timeout`, `mtu_upper_bound`, and `disable_path_mtu_discovery`. Path-MTU discovery is
+    on by default (`mtu_discovery_config` is now an `Option`, internally). `Config` deliberately
+    has no `Debug` impl (it holds the keypair and certificate private keys).
+  - **`Certificate` accessors renamed**: `get_certificate_der` → `certificate_der`,
+    `get_private_key_der` → `private_key_der`.
+  - **`certificate::Error` is now a `thiserror` enum** (`#[non_exhaustive]`) with an
+    `UnsupportedVersion(u8)` variant, and is re-exported at the crate root as `CertificateError`.
+  - **Versioned certificate serialization.** `Certificate::to_bytes` now writes a leading version
+    byte (`SERIALIZATION_VERSION = 1`, also re-exported); `parse` validates it first and rejects a
+    blob from an incompatible build with `UnsupportedVersion`. `parse` additionally rejects a
+    mis-ordered validity window (`not_after <= not_before`). **Serialized certificates from before
+    this change are no longer parseable — regenerate them.** The blob carries the cleartext private
+    key; store it `0600`.
+  - The internal accessors `server_tls_config`, `get_quic_transport_config`, and `cert_hashes` are
+    no longer `pub` (demoted to crate-internal); they returned `wtransport`/`quinn` types and had no
+    external callers.
+
 ## 0.1.0
 
 - Certificate rotation (two-certificate scheme).

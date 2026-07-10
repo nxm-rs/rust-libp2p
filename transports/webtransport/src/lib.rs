@@ -36,6 +36,49 @@
 //! Use [`Config::generate`] to start from a current+next pair; [`Config::new`] (single certificate)
 //! still self-rotates.
 //!
+//! ## Configuring the transport
+//!
+//! [`Config`] has private fields and is `#[non_exhaustive]`; build one with [`Config::new`],
+//! [`Config::new_with_certs`], or [`Config::generate`], then tune it with the chained
+//! `mut self -> Self` setters (mirroring `libp2p-quic`'s `Config`):
+//!
+//! ```no_run
+//! use std::time::Duration;
+//!
+//! use libp2p_identity::Keypair;
+//! use libp2p_webtransport::{Certificate, Config};
+//! use time::OffsetDateTime;
+//!
+//! let keypair = Keypair::generate_ed25519();
+//! let cert = Certificate::generate(OffsetDateTime::now_utc())?;
+//! let config = Config::new(&keypair, cert)
+//!     .max_idle_timeout(30_000) // milliseconds; 0 means "infinite" — use with care
+//!     .keep_alive_interval(Duration::from_secs(5))
+//!     .max_concurrent_stream_limit(256)
+//!     .disable_path_mtu_discovery();
+//! # Ok::<(), libp2p_webtransport::CertificateError>(())
+//! ```
+//!
+//! ## Certificates
+//!
+//! [`Certificate`] can be persisted and restored across restarts with
+//! [`Certificate::to_bytes`] and [`Certificate::parse`]. The serialized form begins with a single
+//! version byte ([`SERIALIZATION_VERSION`]); [`Certificate::parse`] is total (it never panics and
+//! bounds its allocations) and rejects a blob written by an incompatible build with
+//! [`CertificateError::UnsupportedVersion`]. The serialized blob **contains the private key in the
+//! clear** — store it with filesystem-level confidentiality (mode `0600` or a secret store).
+//!
+//! ```no_run
+//! use libp2p_webtransport::Certificate;
+//! use time::OffsetDateTime;
+//!
+//! let cert = Certificate::generate(OffsetDateTime::now_utc())?;
+//! let bytes = cert.to_bytes(); // persist (0600!)
+//! let restored = Certificate::parse(&bytes)?; // restore on the next start
+//! assert_eq!(restored, cert);
+//! # Ok::<(), libp2p_webtransport::CertificateError>(())
+//! ```
+//!
 //! [WebTransport]: https://www.w3.org/TR/webtransport/
 //! [`wtransport`]: https://docs.rs/wtransport
 //! [`libp2p-webtransport-websys`]: https://docs.rs/libp2p-webtransport-websys
@@ -51,7 +94,7 @@ use libp2p_core::transport::TransportError;
 use wtransport::error::ConnectionError;
 
 pub use self::{
-    certificate::{CertHash, Certificate},
+    certificate::{CertHash, Certificate, Error as CertificateError, SERIALIZATION_VERSION},
     config::{Config, ConfigError},
     connection::{Connection, Stream},
     transport::Transport,
@@ -60,7 +103,18 @@ pub use self::{
 /// Errors that may happen on the [`Transport`] or a single [`Connection`].
 ///
 /// This enum is `#[non_exhaustive]`: the crate is unreleased and may add further variants without
-/// a breaking change, so downstream `match`es must include a wildcard arm.
+/// a breaking change, so downstream `match`es must include a trailing `_ =>` arm. A match without
+/// one does not compile:
+///
+/// ```compile_fail
+/// use libp2p_webtransport::Error;
+/// fn describe(e: &Error) -> &'static str {
+///     match e {
+///         Error::UnknownRemotePeerId => "unknown peer",
+///         // no wildcard arm: rejected because `Error` is `#[non_exhaustive]`
+///     }
+/// }
+/// ```
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
