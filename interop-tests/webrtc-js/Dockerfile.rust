@@ -1,0 +1,20 @@
+# Slim runtime for the host-built rust /webrtc interop peer.
+#
+# The binary is compiled on the host (see run.sh) and COPYed in - no
+# dockerized cargo build. trixie-slim rather than bookworm-slim because the
+# host toolchain links against glibc 2.38+ symbols (bookworm ships 2.36).
+# webrtc-rs uses rustls(ring), so no libssl is needed; ca-certificates covers
+# any TLS the websocket transport might negotiate.
+FROM debian:trixie-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY bin/webrtc_p2p_interop /usr/local/bin/webrtc_p2p_interop
+
+ENV COORD_FILE=/coord/dial_addr \
+    TEST_TIMEOUT_SECS=180
+
+ENTRYPOINT ["/usr/local/bin/webrtc_p2p_interop"]
+CMD ["listener"]
