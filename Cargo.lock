@@ -3586,6 +3586,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libp2p-timer"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "futures-bounded",
+ "futures-timer",
+ "tokio",
+]
+
+[[package]]
 name = "libp2p-tls"
 version = "0.7.0"
 dependencies = [

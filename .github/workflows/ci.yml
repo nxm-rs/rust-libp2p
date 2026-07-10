@@ -341,6 +341,34 @@ jobs:
 
           test "$ALL_FEATURES" = "$FULL_FEATURE"
 
+  timer_guard:
+    name: Guard the libp2p-timer sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: wasm32-unknown-unknown
+
+      - uses: r7kamura/rust-problem-matchers@9fe7ca9f6550e5d6358e179d451cc25ea6b54f98 #v1.5.0
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install ripgrep for the completeness oracle
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Completeness oracle (every timer routes through libp2p-timer)
+        run: ./scripts/retimer.sh --check
+
+      - name: Test libp2p-timer
+        run: cargo test --package libp2p-timer
+
+      - name: Check libp2p-timer on wasm32
+        run: cargo check --package libp2p-timer --target wasm32-unknown-unknown
+
   gather_published_crates:
     runs-on: ubuntu-latest
     outputs:
