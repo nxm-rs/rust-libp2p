@@ -20,6 +20,18 @@
 
 //! Interop test: a native rust-libp2p WebTransport node dials a **go-libp2p** WebTransport server.
 //!
+//! ## Known limitation
+//!
+//! This direction (native rust dialing a go-libp2p WebTransport *listener*) currently **fails**:
+//! `wtransport` 0.7 implements a newer revision of WebTransport-over-HTTP/3 than go-libp2p's
+//! draft-02, and although the `Sec-Webtransport-Http3-Draft02` header gets the dialer past
+//! go-libp2p's gate, the HTTP/3 session framing does not line up and the dialer aborts with
+//! `Connect(ConnectionError(LocallyClosed))`. The reverse direction (go-libp2p dialing this
+//! transport's listener) and browser↔native both work; native nodes are generally expected to
+//! *listen* for WebTransport (browsers/go dial them) and to dial other natives over plain QUIC.
+//! This test is retained to track the limitation and will pass once a draft-02-compatible
+//! WebTransport client is available; the CI job that runs it is marked non-blocking.
+//!
 //! The go server is the `wasm-tests/webtransport-tests/echo-server` (go-libp2p), which advertises
 //! its multiaddr over HTTP on `127.0.0.1:4455`. This is ignored by default because it requires
 //! that binary; run it with:
