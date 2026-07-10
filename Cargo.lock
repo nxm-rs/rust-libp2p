@@ -3832,6 +3832,7 @@ dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "libp2p-noise",
+ "libp2p-quic",
  "libp2p-quicreuse",
  "libp2p-timer",
  "libp2p-tls",

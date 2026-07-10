@@ -57,6 +57,17 @@
 //! Note that QUIC provides transport, security, and multiplexing in a single protocol.  Therefore,
 //! QUIC connections do not need to be upgraded. You will get a compile-time error if you try.
 //! Instead, you must pass all needed configuration into the constructor.
+//!
+//! # Single-port co-listening
+//!
+//! The transport sources its `quinn` endpoints from a [`SharedQuicEndpoint`] holder. Construct
+//! the transport with [`GenTransport::with_shared_endpoint`] to co-listen with other
+//! ALPN-routed protocols (such as WebTransport) on one UDP socket: the holder peeks the ALPN
+//! offered in each inbound Initial packet and accepts connections offering `libp2p` with this
+//! transport's mutual-auth server config, so one port serves several protocols. The peek is a
+//! routing hint only: the client-auth policy is fixed by the selected server config before the
+//! handshake starts, so a wrong or absent hint can fail a handshake with an ALPN mismatch but
+//! can never bypass the client certificate verification.
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 

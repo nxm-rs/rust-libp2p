@@ -31,6 +31,7 @@ zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 libp2p-identity = { workspace = true, features = ["rand"] }
+libp2p-quic = { workspace = true, features = ["tokio"] }
 time = { version = "0.3.36", features = ["macros"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

@@ -109,6 +109,12 @@
 //! demultiplexed by the negotiated ALPN (`h3` here, `libp2p` for raw QUIC). A transport built
 //! with [`Transport::new`] uses a private holder per listener instead.
 //!
+//! The holder's ALPN peek is a routing hint only. Each registered `ServerConfig` still enforces
+//! its own ALPN allowlist and its own client-auth policy: the `h3` route serves the
+//! certhash-pinned WebTransport certificate with no client auth, while the `libp2p` route keeps
+//! mutual TLS authentication. A misrouted connection therefore fails its handshake with an ALPN
+//! mismatch; it is never served under the wrong authentication policy.
+//!
 //! Dials are routed through a holder selected from the `(role, port_use)` tuple, exactly like
 //! `libp2p-quic`:
 //!
