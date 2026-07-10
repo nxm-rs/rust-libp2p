@@ -197,6 +197,100 @@ async fn native_to_native_ping_pong() {
     assert_eq!(remote_on_dialer, listener_peer_id);
 }
 
+/// DCUtR emits dials with `role: Listener, port_use: Reuse` (via `override_role()`). This proves
+/// such a reuse dial completes the full WebTransport handshake + stream echo over the new shared
+/// endpoint path (it previously could not be honoured at all). Combined with the unit test
+/// `reuse_dial_uses_listener_socket` (which proves the dial reuses the listener's UDP port), this
+/// covers the hole-punching prerequisite end to end.
+#[tokio::test]
+async fn listener_reuse_dial_ping_pong() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    let (listener_peer_id, mut listener) = create_transport();
+    let (dialer_peer_id, mut dialer) = create_transport();
+
+    let listen_addr =
+        start_listening(&mut listener, "/ip4/127.0.0.1/udp/0/quic-v1/webtransport").await;
+    let dial_addr = listen_addr.with(Protocol::P2p(listener_peer_id));
+
+    // The dialer must itself be listening so it has a shared endpoint to reuse for a
+    // `(Listener, Reuse)` dial (the DCUtR scenario). Drive it to a bound address first.
+    let _dialer_listen =
+        start_listening(&mut dialer, "/ip4/127.0.0.1/udp/0/quic-v1/webtransport").await;
+
+    let listener_task = async move {
+        loop {
+            if let TransportEvent::Incoming { upgrade, .. } = listener.select_next_some().await {
+                let (remote_peer, mut conn) = upgrade.await.map_err(|e| e.to_string())?;
+                let mut stream = future::poll_fn(|cx| {
+                    let _ = conn.poll_unpin(cx)?;
+                    conn.poll_inbound_unpin(cx)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                let mut buf = [0u8; 4];
+                stream
+                    .read_exact(&mut buf)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(&buf, b"PING");
+                stream.write_all(b"PONG").await.map_err(|e| e.to_string())?;
+                stream.flush().await.map_err(|e| e.to_string())?;
+                futures_timer::Delay::new(Duration::from_secs(1)).await;
+                return Ok::<PeerId, String>(remote_peer);
+            }
+        }
+    };
+
+    let dialer_task = async move {
+        // `(Listener, Reuse)` — exactly what DCUtR's `override_role()` produces.
+        let (remote_peer, mut conn) = dialer
+            .dial(
+                dial_addr,
+                DialOpts {
+                    role: Endpoint::Listener,
+                    port_use: PortUse::Reuse,
+                },
+            )
+            .map_err(|e| format!("{e:?}"))?
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut stream = future::poll_fn(|cx| {
+            let _ = conn.poll_unpin(cx)?;
+            conn.poll_outbound_unpin(cx)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        stream.write_all(b"PING").await.map_err(|e| e.to_string())?;
+        stream.flush().await.map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 4];
+        stream
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| e.to_string())?;
+        assert_eq!(&buf, b"PONG");
+        Ok::<PeerId, String>(remote_peer)
+    };
+
+    futures::pin_mut!(listener_task);
+    futures::pin_mut!(dialer_task);
+    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        match future::select(listener_task, dialer_task).await {
+            future::Either::Left((l, d_fut)) => (l, d_fut.await),
+            future::Either::Right((d, l_fut)) => (l_fut.await, d),
+        }
+    })
+    .await
+    .expect("test timed out");
+
+    let remote_on_listener = outcome.0.expect("listener side");
+    let remote_on_dialer = outcome.1.expect("dialer side");
+    assert_eq!(remote_on_listener, dialer_peer_id);
+    assert_eq!(remote_on_dialer, listener_peer_id);
+}
+
 /// A single-certificate transport whose `Config` has been tuned via the chained setters,
 /// including disabling path-MTU discovery.
 fn create_transport_custom_config() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {

@@ -99,13 +99,25 @@
 //! # Ok::<(), libp2p_webtransport::CertificateError>(())
 //! ```
 //!
+//! # Socket reuse & hole punching
+//!
+//! Dials are routed through a `quinn::Endpoint` selected from the `(role, port_use)` tuple, exactly
+//! like `libp2p-quic`:
+//!
+//! * **`PortUse::Reuse`** (the default for ordinary dials, and what DCUtR's `override_role()`
+//!   emits as `(Listener, Reuse)`) dials from an existing listener's **shared** `quinn::Endpoint`
+//!   when one exists — i.e. the listener's own UDP socket — preserving the NAT 4-tuple. Without a
+//!   listener it reuses a cached per-family ephemeral dialer endpoint.
+//! * **`(Listener, New)`** (a coordinated DCUtR hole-punch) also dials from the listener's shared
+//!   endpoint, so the WebTransport session rides the hole-punched path. (This previously failed
+//!   with `Error::HolePunchingUnsupported`.)
+//!
+//! This is enabled by driving `wtransport`'s WebTransport/H3 client handshake over an
+//! externally-established `quinn::Connection` (via the fork's `wtransport::endpoint::connect_over_quic`)
+//! rather than letting `wtransport` bind its own client socket.
+//!
 //! # Limitations
 //!
-//! * **No DCUtR hole punching:** a coordinated hole-punch dial (`DialOpts { role:
-//!   Endpoint::Listener, port_use: PortUse::New, .. }`) fails with
-//!   [`Error::HolePunchingUnsupported`], because `wtransport`'s client endpoint cannot dial from
-//!   the listener's socket.
-//! * **`PortUse::Reuse` is not honoured:** ordinary dials always bind a fresh ephemeral socket.
 //! * **Only the `h3` ALPN is offered** by the server.
 //!
 //! [WebTransport]: https://www.w3.org/TR/webtransport/
@@ -175,6 +187,16 @@ pub enum Error {
     #[error(transparent)]
     StreamOpening(#[from] wtransport::error::StreamOpeningError),
 
+    /// Error while initiating the QUIC connection on the shared endpoint (before the WebTransport
+    /// handshake), e.g. an invalid client TLS/transport config.
+    #[error(transparent)]
+    QuicConnect(#[from] quinn::ConnectError),
+
+    /// Error while establishing the QUIC connection on the shared endpoint (before the WebTransport
+    /// handshake).
+    #[error(transparent)]
+    QuicConnection(#[from] quinn::ConnectionError),
+
     /// The multiaddr did not contain any certificate hashes, which are required to dial a
     /// libp2p WebTransport server that uses a self-signed certificate.
     #[error("Cannot dial a WebTransport address without certificate hashes")]
@@ -189,11 +211,10 @@ pub enum Error {
     #[error(transparent)]
     Config(#[from] ConfigError),
 
-    /// Coordinated hole punching (DCUtR) was requested by dialing with
-    /// `DialOpts { role: Endpoint::Listener, port_use: PortUse::New, .. }`, but this transport
-    /// cannot dial from the listener's socket: the underlying `wtransport` API only exposes
-    /// `connect` on a *client* endpoint, which always binds a fresh socket. Hole punching over
-    /// WebTransport is therefore unsupported.
+    /// Deprecated/retained for API stability: WebTransport hole-punch dials
+    /// (`DialOpts { role: Endpoint::Listener, port_use: PortUse::New, .. }`) are now supported by
+    /// dialing from the listener's shared `quinn::Endpoint`, so this variant is no longer returned.
+    /// It is kept only so existing `match` arms keep compiling.
     #[error("WebTransport does not support dialing as a listener (hole punching)")]
     HolePunchingUnsupported,
 }
