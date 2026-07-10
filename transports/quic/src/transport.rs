@@ -295,7 +295,15 @@ impl<P: Provider> Transport for GenTransport<P> {
 
         let (sink, inbound) = mpsc::channel(INBOUND_QUEUE_LEN);
         holder
-            .register(LIBP2P_ALPN.to_vec(), server_config, sink)
+            // The libp2p/QUIC route carries the mutual-auth verifier, so it is the designated
+            // default: absent/unknown ALPNs fall back to it regardless of registration order.
+            .register(
+                LIBP2P_ALPN.to_vec(),
+                vec![LIBP2P_ALPN.to_vec()],
+                server_config,
+                sink,
+                true,
+            )
             .map_err(holder_error)?;
 
         let listener = Listener::new(

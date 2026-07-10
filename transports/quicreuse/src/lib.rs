@@ -36,12 +36,47 @@
 //! downgrade authentication: the client-auth policy is fixed by the selected `ServerConfig`
 //! before the handshake starts, not negotiated by the hint.
 //!
+//! Two further invariants are enforced at [`register`](SharedQuicEndpoint::register) /
+//! [`update_server_config`](SharedQuicEndpoint::update_server_config) time so the property above
+//! cannot be undermined by a misconfigured registration:
+//!
+//! * A route's declared ALPN allowlist must contain the ALPN it is registered under (a config that
+//!   could never complete a handshake for its own key is rejected), and
+//! * No two routes may declare overlapping allowlists. If two routes both accepted the same ALPN,
+//!   the peek could route a connection offering it to either handshake, making the client-auth
+//!   policy for that ALPN non-deterministic. Rejecting the overlap keeps each ALPN bound to exactly
+//!   one auth policy.
+//!
+//! The fallback for an absent or unknown offered ALPN is the explicitly designated *default route*
+//! (see [`register`](SharedQuicEndpoint::register)'s `default` flag), not a positional accident of
+//! registration order: the mutual-auth `libp2p`/QUIC route stays the fallback even if a
+//! no-client-auth route (e.g. WebTransport) is registered on the same endpoint first.
+//!
 //! # Denial-of-service posture
 //!
 //! The ClientHello parse behind [`quinn::Incoming::alpn`] runs inside quinn after its retry and
 //! address-validation handling of the Initial packet. On top of that, this crate only reads the
 //! hint when more than one ALPN is registered; a single-protocol endpoint takes the direct
 //! accept path with no peek-dependent branching.
+//!
+//! # Migration note: dropping the quinn fork
+//!
+//! `Incoming::alpn()` / `Incoming::server_name()` are a best-effort peek carried by our pinned
+//! `quinn`/`quinn-proto` fork (see `[patch.crates-io]` in the workspace `Cargo.toml`). They are a
+//! stopgap: the peek reads only the first Initial packet, so a ClientHello that spans multiple
+//! packets (large post-quantum key shares, extra extensions) can peek empty and misroute.
+//!
+//! The upstream replacement is quinn PR #2671 ("staged ClientHello acceptor for `ServerConfig`
+//! selection", closes quinn-rs/quinn#2024; prerequisite #2701 rustls-0.24), which buffers the
+//! full ClientHello and hands it to an acceptor callback that returns the `ServerConfig` — fixing
+//! the large-ClientHello misroute. Do NOT describe this as "upstreaming `Incoming::alpn()`": the
+//! upstream API is a staged acceptor, not the peek accessor.
+//!
+//! Cutting over is a single ATOMIC change, not a bare `[patch]` drop: quinn 0.11.11's `Incoming`
+//! has no `alpn()`/`server_name()`, so removing the patch without simultaneously rewriting this
+//! crate's accept loop (`route_incoming`) onto the staged-acceptor API will not compile. Because
+//! the staged acceptor changes the routing input (whole ClientHello vs. first-packet peek), the
+//! cutover also needs end-to-end re-validation against the interop suites.
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
@@ -66,6 +101,15 @@ pub enum Error {
     /// The ALPN is not registered on this endpoint.
     #[error("ALPN {0:?} is not registered on this endpoint")]
     UnknownAlpn(AlpnProtocol),
+    /// The route key ALPN is not contained in the `ServerConfig`'s own ALPN allowlist, so the
+    /// config could never complete a handshake for the ALPN it is registered under.
+    #[error("route key ALPN {0:?} is not in its own ServerConfig ALPN allowlist")]
+    RouteKeyNotInAllowlist(AlpnProtocol),
+    /// The `ServerConfig`'s ALPN allowlist overlaps an already-registered route's allowlist. Two
+    /// routes accepting the same ALPN would let the peek route a connection to either handshake,
+    /// so the auth policy for that ALPN would no longer be deterministic.
+    #[error("ALPN {0:?} is already served by another registered route's ServerConfig allowlist")]
+    OverlappingAllowlist(AlpnProtocol),
 }
 
 /// An ALPN protocol identifier, displayed as ASCII where possible.
@@ -152,26 +196,39 @@ impl SharedQuicEndpoint {
     /// Registers a protocol on this endpoint: inbound connections offering `alpn` are accepted
     /// with `server_config` and delivered on `sink`.
     ///
-    /// The first registered protocol is the default: connections with an absent or unknown
-    /// offered ALPN are routed to it (its `ServerConfig` still decides whether they may
-    /// complete the handshake). Registering a further ALPN promotes the endpoint to mixed mode,
-    /// in which the offered ALPN is peeked to select the route.
+    /// `allowlist` is the set of ALPNs `server_config` will complete a handshake for (i.e. its
+    /// rustls `alpn_protocols`); it must contain `alpn`. Registering a second protocol promotes
+    /// the endpoint to mixed mode, in which the offered ALPN is peeked to select the route.
     ///
-    /// Errors if `alpn` is already registered.
+    /// `default` designates this route as the fallback for connections whose offered ALPN is
+    /// absent or matches no route. Exactly the route registered with `default == true` receives
+    /// those connections (its own `ServerConfig` still decides whether they may complete the
+    /// handshake), regardless of registration order. This is how the mutual-auth `libp2p`/QUIC
+    /// route stays the fallback even when a no-client-auth route is registered first. If no route
+    /// is registered as default, the first-registered route is used as a last resort.
+    ///
+    /// Errors if `alpn` is already registered ([`Error::DuplicateAlpn`]), if `allowlist` does not
+    /// contain `alpn` ([`Error::RouteKeyNotInAllowlist`]), or if `allowlist` overlaps another
+    /// registered route's allowlist ([`Error::OverlappingAllowlist`]).
     pub fn register(
         &self,
         alpn: Vec<u8>,
+        allowlist: Vec<Vec<u8>>,
         server_config: Arc<quinn::ServerConfig>,
         sink: mpsc::Sender<quinn::Connecting>,
+        default: bool,
     ) -> Result<(), Error> {
         let mut table = lock(&self.routes);
         if table.routes.iter().any(|r| r.alpn == alpn) {
             return Err(Error::DuplicateAlpn(AlpnProtocol(alpn)));
         }
+        validate_allowlist(&alpn, &allowlist, &table.routes, None)?;
         table.routes.push(Route {
             alpn,
+            allowlist,
             server_config,
             sink,
+            default,
         });
         self.sync_endpoint_config(&table);
         Ok(())
@@ -179,32 +236,39 @@ impl SharedQuicEndpoint {
 
     /// Removes a registered protocol. Connections already handed to its sink are unaffected.
     ///
-    /// If the default (first-registered) protocol is removed, the next registered one becomes
-    /// the default. Removing the last protocol stops the endpoint accepting connections.
+    /// If the designated default protocol is removed, the fallback reverts to the first remaining
+    /// route until another default is registered. Removing the last protocol stops the endpoint
+    /// accepting connections.
     pub fn unregister(&self, alpn: &[u8]) {
         let mut table = lock(&self.routes);
         table.routes.retain(|r| r.alpn != alpn);
         self.sync_endpoint_config(&table);
     }
 
-    /// Replaces the `ServerConfig` for a registered ALPN, e.g. on certificate rotation.
-    /// Affects new inbound connections only.
+    /// Replaces the `ServerConfig` (and its declared `allowlist`) for a registered ALPN, e.g. on
+    /// certificate rotation. Affects new inbound connections only.
     ///
-    /// Errors if `alpn` is not registered.
+    /// The same invariants as [`register`](Self::register) are re-checked against the other
+    /// routes: `allowlist` must contain `alpn` and must not overlap another route's allowlist.
+    ///
+    /// Errors if `alpn` is not registered ([`Error::UnknownAlpn`]).
     pub fn update_server_config(
         &self,
         alpn: &[u8],
+        allowlist: Vec<Vec<u8>>,
         server_config: Arc<quinn::ServerConfig>,
     ) -> Result<(), Error> {
         let mut table = lock(&self.routes);
-        match table.routes.iter_mut().find(|r| r.alpn == alpn) {
-            Some(route) => {
-                route.server_config = server_config;
-                self.sync_endpoint_config(&table);
-                Ok(())
-            }
-            None => Err(Error::UnknownAlpn(AlpnProtocol(alpn.to_vec()))),
-        }
+        let Some(index) = table.routes.iter().position(|r| r.alpn == alpn) else {
+            return Err(Error::UnknownAlpn(AlpnProtocol(alpn.to_vec())));
+        };
+        // Exclude the route being updated from the overlap check: it is expected to still serve
+        // its own key ALPN.
+        validate_allowlist(alpn, &allowlist, &table.routes, Some(index))?;
+        table.routes[index].allowlist = allowlist;
+        table.routes[index].server_config = server_config;
+        self.sync_endpoint_config(&table);
+        Ok(())
     }
 
     /// Dials a raw QUIC connection from the shared socket.
@@ -228,11 +292,33 @@ impl SharedQuicEndpoint {
     fn sync_endpoint_config(&self, table: &RouteTable) {
         self.endpoint.set_server_config(
             table
-                .routes
-                .first()
-                .map(|r| r.server_config.as_ref().clone()),
+                .default_index()
+                .map(|i| table.routes[i].server_config.as_ref().clone()),
         );
     }
+}
+
+/// Checks the allowlist invariants for a route about to be (re)registered under `alpn`:
+/// the allowlist must contain the route key, and must not overlap any other route's allowlist.
+/// `skip` is the index of the route being updated in place, excluded from the overlap scan.
+fn validate_allowlist(
+    alpn: &[u8],
+    allowlist: &[Vec<u8>],
+    routes: &[Route],
+    skip: Option<usize>,
+) -> Result<(), Error> {
+    if !allowlist.iter().any(|a| a == alpn) {
+        return Err(Error::RouteKeyNotInAllowlist(AlpnProtocol(alpn.to_vec())));
+    }
+    for (i, route) in routes.iter().enumerate() {
+        if Some(i) == skip {
+            continue;
+        }
+        if let Some(clash) = allowlist.iter().find(|a| route.allowlist.contains(a)) {
+            return Err(Error::OverlappingAllowlist(AlpnProtocol(clash.clone())));
+        }
+    }
+    Ok(())
 }
 
 impl Drop for SharedQuicEndpoint {
@@ -242,34 +328,57 @@ impl Drop for SharedQuicEndpoint {
 }
 
 struct RouteTable {
-    /// Registration order is significant: the first route is the default.
     routes: Vec<Route>,
 }
 
 impl RouteTable {
-    fn select(&self, offered: &[Vec<u8>]) -> usize {
-        select_route(offered, self.routes.iter().map(|r| r.alpn.as_slice()))
+    /// Index of the fallback route for absent/unknown offered ALPNs: the explicitly designated
+    /// default route, or the first remaining route if the default was unregistered, or `None`
+    /// when no route is registered.
+    fn default_index(&self) -> Option<usize> {
+        if self.routes.is_empty() {
+            return None;
+        }
+        Some(self.routes.iter().position(|r| r.default).unwrap_or(0))
+    }
+
+    fn select(&self, offered: &[Vec<u8>], default: usize) -> usize {
+        select_route(
+            offered,
+            self.routes.iter().map(|r| r.alpn.as_slice()),
+            default,
+        )
     }
 }
 
 /// Index of the route serving the offered ALPN list: the route whose ALPN equals the first
-/// offered protocol, else the default (first-registered) route.
-fn select_route<'a>(offered: &[Vec<u8>], registered: impl Iterator<Item = &'a [u8]>) -> usize {
+/// offered protocol, else the designated `default` route.
+fn select_route<'a>(
+    offered: &[Vec<u8>],
+    registered: impl Iterator<Item = &'a [u8]>,
+    default: usize,
+) -> usize {
     match offered.first() {
         Some(first) => registered
             .enumerate()
             .find_map(|(i, alpn)| (alpn == first.as_slice()).then_some(i))
             // Absent or unknown ALPN: fall back to the default route. Its `ServerConfig`
             // still enforces its own ALPN allowlist, so this cannot mis-authenticate.
-            .unwrap_or(0),
-        None => 0,
+            .unwrap_or(default),
+        None => default,
     }
 }
 
 struct Route {
+    /// The ALPN this route is registered (and routed) under.
     alpn: Vec<u8>,
+    /// The full set of ALPNs this route's `ServerConfig` will complete a handshake for. Contains
+    /// `alpn` and never overlaps another route's allowlist (enforced at registration).
+    allowlist: Vec<Vec<u8>>,
     server_config: Arc<quinn::ServerConfig>,
     sink: mpsc::Sender<quinn::Connecting>,
+    /// Whether this is the designated default (fallback) route for absent/unknown ALPNs.
+    default: bool,
 }
 
 /// Locks ignoring poisoning: the table is only mutated by panic-free operations, and the accept
@@ -291,17 +400,17 @@ fn route_incoming(incoming: quinn::Incoming, routes: &Mutex<RouteTable>) {
     // fallback always lands on a live route.
     table.routes.retain(|r| !r.sink.is_closed());
 
-    if table.routes.is_empty() {
+    let Some(default) = table.default_index() else {
         tracing::debug!(remote=%incoming.remote_address(), "no registered ALPN, refusing");
         incoming.refuse();
         return;
-    }
+    };
 
     // Only consult the peeked hint in mixed mode; a single-protocol endpoint accepts directly.
     let index = if table.routes.len() > 1 {
-        table.select(incoming.alpn())
+        table.select(incoming.alpn(), default)
     } else {
-        0
+        default
     };
 
     let route = &mut table.routes[index];
@@ -333,9 +442,13 @@ mod tests {
 
     const REGISTERED: &[&[u8]] = &[b"libp2p", b"h3"];
 
-    fn select(offered: &[&[u8]]) -> usize {
+    fn select_with_default(offered: &[&[u8]], default: usize) -> usize {
         let offered = offered.iter().map(|a| a.to_vec()).collect::<Vec<_>>();
-        select_route(&offered, REGISTERED.iter().copied())
+        select_route(&offered, REGISTERED.iter().copied(), default)
+    }
+
+    fn select(offered: &[&[u8]]) -> usize {
+        select_with_default(offered, 0)
     }
 
     #[test]
@@ -357,5 +470,21 @@ mod tests {
     #[test]
     fn unknown_alpn_selects_default() {
         assert_eq!(select(&[b"other"]), 0);
+    }
+
+    #[test]
+    fn matching_alpn_ignores_default() {
+        // A concretely offered, registered ALPN always wins over the fallback, whatever the
+        // designated default index is.
+        assert_eq!(select_with_default(&[b"libp2p"], 1), 0);
+        assert_eq!(select_with_default(&[b"h3"], 0), 1);
+    }
+
+    #[test]
+    fn absent_or_unknown_alpn_honours_nonzero_default() {
+        // The fallback follows the designated default route, not positional index 0: e.g. when
+        // the mutual-auth route was registered second, absent/unknown ALPNs still land on it.
+        assert_eq!(select_with_default(&[], 1), 1);
+        assert_eq!(select_with_default(&[b"other"], 1), 1);
     }
 }

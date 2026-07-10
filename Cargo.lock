@@ -1344,7 +1344,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2342,7 +2342,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.9",
+ "socket2 0.6.4",
  "system-configuration 0.6.1",
  "tokio",
  "tower-service",
@@ -5128,7 +5128,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "git+https://github.com/mfw78/quinn.git?rev=d9635714#d9635714f4909e574146c8cc04846bc36beb31df"
+source = "git+https://github.com/mfw78/quinn.git?rev=d9635714f4909e574146c8cc04846bc36beb31df#d9635714f4909e574146c8cc04846bc36beb31df"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -5138,7 +5138,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.9",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5148,7 +5148,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/mfw78/quinn.git?rev=d9635714#d9635714f4909e574146c8cc04846bc36beb31df"
+source = "git+https://github.com/mfw78/quinn.git?rev=d9635714f4909e574146c8cc04846bc36beb31df#d9635714f4909e574146c8cc04846bc36beb31df"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -5170,14 +5170,14 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "git+https://github.com/mfw78/quinn.git?rev=d9635714#d9635714f4909e574146c8cc04846bc36beb31df"
+source = "git+https://github.com/mfw78/quinn.git?rev=d9635714f4909e574146c8cc04846bc36beb31df#d9635714f4909e574146c8cc04846bc36beb31df"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.9",
+ "socket2 0.6.4",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5793,7 +5793,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5851,7 +5851,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6481,7 +6481,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8269,7 +8269,7 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 [[package]]
 name = "wtransport"
 version = "0.7.1"
-source = "git+https://github.com/mfw78/wtransport.git?rev=49bba00150dc#49bba00150dccaf32fb1189801303fa9740f335a"
+source = "git+https://github.com/mfw78/wtransport.git?rev=49bba00150dccaf32fb1189801303fa9740f335a#49bba00150dccaf32fb1189801303fa9740f335a"
 dependencies = [
  "bytes",
  "pem",
@@ -8292,7 +8292,7 @@ dependencies = [
 [[package]]
 name = "wtransport-proto"
 version = "0.7.1"
-source = "git+https://github.com/mfw78/wtransport.git?rev=49bba00150dc#49bba00150dccaf32fb1189801303fa9740f335a"
+source = "git+https://github.com/mfw78/wtransport.git?rev=49bba00150dccaf32fb1189801303fa9740f335a#49bba00150dccaf32fb1189801303fa9740f335a"
 dependencies = [
  "httlib-huffman",
  "octets",

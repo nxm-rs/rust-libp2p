@@ -166,7 +166,7 @@ async fn accept_and_echo(
             stream.write_all(b"PONG").await.map_err(|e| e.to_string())?;
             stream.flush().await.map_err(|e| e.to_string())?;
             // Keep the connection alive briefly so the dialer can read the response.
-            futures_timer::Delay::new(Duration::from_secs(1)).await;
+            libp2p_timer::Delay::new(Duration::from_secs(1)).await;
 
             return Ok((remote_peer, local_addr));
         }
@@ -454,8 +454,8 @@ async fn shared_listener_preserves_quic_mutual_auth() {
     let dialer = SharedQuicEndpoint::bind("127.0.0.1:0".parse().unwrap()).unwrap();
 
     // 1. No client certificate: the server's mutual-auth verifier demands one, so the handshake
-    //    fails with the TLS `certificate_required` alert (116). Under the Driver B regression
-    //    (a single no-client-auth config for the whole endpoint) this dial would SUCCEED.
+    //    fails with the TLS `certificate_required` alert (116). Under the Driver B regression (a
+    //    single no-client-auth config for the whole endpoint) this dial would SUCCEED.
     let connecting = dialer
         .dial_quic(server_addr, probe_client_config(None), "l")
         .unwrap();

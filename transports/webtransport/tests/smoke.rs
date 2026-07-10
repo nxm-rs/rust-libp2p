@@ -281,7 +281,7 @@ async fn listener_reuse_dial_ping_pong() {
                 assert_eq!(&buf, b"PING");
                 stream.write_all(b"PONG").await.map_err(|e| e.to_string())?;
                 stream.flush().await.map_err(|e| e.to_string())?;
-                futures_timer::Delay::new(Duration::from_secs(1)).await;
+                libp2p_timer::Delay::new(Duration::from_secs(1)).await;
                 return Ok::<PeerId, String>(remote_peer);
             }
         }

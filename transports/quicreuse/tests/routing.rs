@@ -92,13 +92,21 @@ async fn routes_by_offered_alpn() {
     listener
         .register(
             LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
             server_config(&keypair, &[LIBP2P]),
             libp2p_tx,
+            true,
         )
         .unwrap();
     // Promotion: a second ALPN on the same socket.
     listener
-        .register(H3.to_vec(), server_config(&keypair, &[H3]), h3_tx)
+        .register(
+            H3.to_vec(),
+            vec![H3.to_vec()],
+            server_config(&keypair, &[H3]),
+            h3_tx,
+            false,
+        )
         .unwrap();
 
     let dialer = endpoint();
@@ -143,12 +151,20 @@ async fn unknown_alpn_routes_to_default() {
     listener
         .register(
             LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec(), FALLBACK.to_vec()],
             server_config(&keypair, &[LIBP2P, FALLBACK]),
             libp2p_tx,
+            true,
         )
         .unwrap();
     listener
-        .register(H3.to_vec(), server_config(&keypair, &[H3]), h3_tx)
+        .register(
+            H3.to_vec(),
+            vec![H3.to_vec()],
+            server_config(&keypair, &[H3]),
+            h3_tx,
+            false,
+        )
         .unwrap();
 
     let dialer = endpoint();
@@ -179,12 +195,20 @@ async fn unknown_alpn_is_rejected_by_default_config() {
     listener
         .register(
             LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
             server_config(&keypair, &[LIBP2P]),
             libp2p_tx,
+            true,
         )
         .unwrap();
     listener
-        .register(H3.to_vec(), server_config(&keypair, &[H3]), h3_tx)
+        .register(
+            H3.to_vec(),
+            vec![H3.to_vec()],
+            server_config(&keypair, &[H3]),
+            h3_tx,
+            false,
+        )
         .unwrap();
 
     let dialer = endpoint();
@@ -218,12 +242,20 @@ async fn absent_alpn_is_rejected_by_default_config() {
     listener
         .register(
             LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
             server_config(&keypair, &[LIBP2P]),
             libp2p_tx,
+            true,
         )
         .unwrap();
     listener
-        .register(H3.to_vec(), server_config(&keypair, &[H3]), h3_tx)
+        .register(
+            H3.to_vec(),
+            vec![H3.to_vec()],
+            server_config(&keypair, &[H3]),
+            h3_tx,
+            false,
+        )
         .unwrap();
 
     let dialer = endpoint();
@@ -247,7 +279,13 @@ async fn single_registration_accepts_directly() {
     let listener = endpoint();
     let (tx, mut rx) = mpsc::channel(8);
     listener
-        .register(LIBP2P.to_vec(), server_config(&keypair, &[LIBP2P]), tx)
+        .register(
+            LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
+            server_config(&keypair, &[LIBP2P]),
+            tx,
+            true,
+        )
         .unwrap();
 
     let dialer = endpoint();
@@ -272,10 +310,22 @@ async fn duplicate_alpn_is_rejected() {
     let (tx1, _rx1) = mpsc::channel(8);
     let (tx2, _rx2) = mpsc::channel(8);
     listener
-        .register(LIBP2P.to_vec(), server_config(&keypair, &[LIBP2P]), tx1)
+        .register(
+            LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
+            server_config(&keypair, &[LIBP2P]),
+            tx1,
+            true,
+        )
         .unwrap();
     let err = listener
-        .register(LIBP2P.to_vec(), server_config(&keypair, &[LIBP2P]), tx2)
+        .register(
+            LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
+            server_config(&keypair, &[LIBP2P]),
+            tx2,
+            false,
+        )
         .unwrap_err();
     assert!(matches!(err, Error::DuplicateAlpn(_)));
 }
@@ -287,7 +337,13 @@ async fn dropped_sink_refuses_connections() {
     let listener = endpoint();
     let (tx, rx) = mpsc::channel(8);
     listener
-        .register(LIBP2P.to_vec(), server_config(&keypair, &[LIBP2P]), tx)
+        .register(
+            LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
+            server_config(&keypair, &[LIBP2P]),
+            tx,
+            true,
+        )
         .unwrap();
     drop(rx);
 
@@ -316,12 +372,20 @@ async fn unregister_promotes_next_default() {
     listener
         .register(
             LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec()],
             server_config(&keypair, &[LIBP2P]),
             libp2p_tx,
+            true,
         )
         .unwrap();
     listener
-        .register(H3.to_vec(), server_config(&keypair, &[H3, FALLBACK]), h3_tx)
+        .register(
+            H3.to_vec(),
+            vec![H3.to_vec(), FALLBACK.to_vec()],
+            server_config(&keypair, &[H3, FALLBACK]),
+            h3_tx,
+            false,
+        )
         .unwrap();
     listener.unregister(LIBP2P);
 
@@ -346,13 +410,125 @@ async fn update_server_config_requires_registration() {
     let listener = endpoint();
     let cfg = server_config(&keypair, &[LIBP2P]);
     let err = listener
-        .update_server_config(LIBP2P, cfg.clone())
+        .update_server_config(LIBP2P, vec![LIBP2P.to_vec()], cfg.clone())
         .unwrap_err();
     assert!(matches!(err, Error::UnknownAlpn(_)));
 
     let (tx, _rx) = mpsc::channel(8);
-    listener.register(LIBP2P.to_vec(), cfg, tx).unwrap();
     listener
-        .update_server_config(LIBP2P, server_config(&keypair, &[LIBP2P]))
+        .register(LIBP2P.to_vec(), vec![LIBP2P.to_vec()], cfg, tx, true)
         .unwrap();
+    listener
+        .update_server_config(
+            LIBP2P,
+            vec![LIBP2P.to_vec()],
+            server_config(&keypair, &[LIBP2P]),
+        )
+        .unwrap();
+}
+
+/// Registering a route whose `ServerConfig` allowlist overlaps an already-registered route's
+/// allowlist is rejected: two routes must never both accept the same ALPN, or the peek could
+/// route a connection offering it to either handshake (non-deterministic auth policy).
+#[tokio::test]
+async fn overlapping_allowlist_is_rejected() {
+    let keypair = Keypair::generate_ed25519();
+    let listener = endpoint();
+    let (libp2p_tx, _libp2p_rx) = mpsc::channel(8);
+    let (h3_tx, _h3_rx) = mpsc::channel(8);
+    // The libp2p route's config also (wrongly) allows H3.
+    listener
+        .register(
+            LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec(), H3.to_vec()],
+            server_config(&keypair, &[LIBP2P, H3]),
+            libp2p_tx,
+            true,
+        )
+        .unwrap();
+    // Registering an H3 route now would make H3 servable by two configs: rejected.
+    let err = listener
+        .register(
+            H3.to_vec(),
+            vec![H3.to_vec()],
+            server_config(&keypair, &[H3]),
+            h3_tx,
+            false,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::OverlappingAllowlist(_)),
+        "expected OverlappingAllowlist, got {err:?}"
+    );
+}
+
+/// A route whose allowlist does not even contain the ALPN it is registered under is rejected:
+/// such a config could never complete a handshake for its own routing key.
+#[tokio::test]
+async fn route_key_absent_from_allowlist_is_rejected() {
+    let keypair = Keypair::generate_ed25519();
+    let listener = endpoint();
+    let (tx, _rx) = mpsc::channel(8);
+    let err = listener
+        .register(
+            LIBP2P.to_vec(),
+            vec![H3.to_vec()],
+            server_config(&keypair, &[H3]),
+            tx,
+            true,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::RouteKeyNotInAllowlist(_)),
+        "expected RouteKeyNotInAllowlist, got {err:?}"
+    );
+}
+
+/// AUTH PRESERVATION: an absent/unknown offered ALPN falls back to the *designated* default
+/// (mutual-auth libp2p) route, not to positional index 0. Proven by registering the
+/// no-client-auth H3 route FIRST and the mutual-auth libp2p route SECOND: an unmatched offer
+/// must still land on the libp2p sink.
+#[tokio::test]
+async fn absent_alpn_falls_back_to_default_regardless_of_registration_order() {
+    let keypair = Keypair::generate_ed25519();
+    let listener = endpoint();
+    let (libp2p_tx, mut libp2p_rx) = mpsc::channel(8);
+    let (h3_tx, mut h3_rx) = mpsc::channel(8);
+    // H3 (non-default) registered FIRST — it occupies positional index 0.
+    listener
+        .register(
+            H3.to_vec(),
+            vec![H3.to_vec()],
+            server_config(&keypair, &[H3]),
+            h3_tx,
+            false,
+        )
+        .unwrap();
+    // The mutual-auth libp2p route is registered SECOND but designated the default. Its allowlist
+    // also permits FALLBACK so the fallback handshake completes and delivery is observable.
+    listener
+        .register(
+            LIBP2P.to_vec(),
+            vec![LIBP2P.to_vec(), FALLBACK.to_vec()],
+            server_config(&keypair, &[LIBP2P, FALLBACK]),
+            libp2p_tx,
+            true,
+        )
+        .unwrap();
+
+    let dialer = endpoint();
+    let outbound = dialer
+        .dial_quic(
+            listener.local_addr(),
+            client_config(&keypair, &[FALLBACK]),
+            "l",
+        )
+        .unwrap();
+
+    // Despite H3 being at index 0, the unmatched offer lands on the libp2p (default) sink.
+    let inbound = recv(&mut libp2p_rx).await;
+    let (outbound, inbound) = tokio::join!(outbound, inbound);
+    assert_eq!(negotiated_alpn(&outbound.unwrap()), FALLBACK);
+    assert_eq!(negotiated_alpn(&inbound.unwrap()), FALLBACK);
+    assert!(h3_rx.try_next().is_err(), "must not land on the h3 sink");
 }

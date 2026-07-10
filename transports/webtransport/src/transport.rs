@@ -234,7 +234,16 @@ impl libp2p_core::Transport for Transport {
         .map_err(TransportError::Other)?;
         let (sink, inbound) = mpsc::channel(INBOUND_QUEUE_LEN);
         holder
-            .register(WEBTRANSPORT_ALPN.to_vec(), Arc::new(server_config), sink)
+            // WebTransport (no client auth) is never the fallback route (`default: false`); on a
+            // shared endpoint the mutual-auth libp2p/QUIC route stays the default for unknown
+            // ALPNs.
+            .register(
+                WEBTRANSPORT_ALPN.to_vec(),
+                alpn_protocols(),
+                Arc::new(server_config),
+                sink,
+                false,
+            )
             .map_err(|e| TransportError::Other(holder_error(e)))?;
 
         let keypair = &self.config.keypair;
@@ -682,7 +691,7 @@ impl Listener {
         );
         let server_config = make_quinn_server_config(tls, self.quic_params.build())?;
         self.holder
-            .update_server_config(WEBTRANSPORT_ALPN, Arc::new(server_config))
+            .update_server_config(WEBTRANSPORT_ALPN, alpn_protocols(), Arc::new(server_config))
             .map_err(holder_error)?;
         self.cert_hashes = new_hashes;
 
@@ -1233,7 +1242,13 @@ mod test {
         let holder = Arc::new(new_holder(socket).unwrap());
         let (sink, inbound) = mpsc::channel(INBOUND_QUEUE_LEN);
         holder
-            .register(WEBTRANSPORT_ALPN.to_vec(), Arc::new(server_config), sink)
+            .register(
+                WEBTRANSPORT_ALPN.to_vec(),
+                alpn_protocols(),
+                Arc::new(server_config),
+                sink,
+                false,
+            )
             .unwrap();
         let local_addr = holder.local_addr();
 
