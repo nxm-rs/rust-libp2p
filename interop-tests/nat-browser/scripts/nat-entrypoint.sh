@@ -33,6 +33,15 @@ fi
 
 iptables -t nat -A POSTROUTING -s "$LAN_SUBNET" -o "$pub_if" -j MASQUERADE
 
+# Drop unsolicited inbound UDP to this router's own pub address BEFORE conntrack
+# confirms it (confirmation only happens after filter INPUT). Without this, the
+# remote peer's early STUN connectivity checks pin an unreplied conntrack entry
+# whose tuple clashes with the reply tuple of the punch flow the NAT'd peer opens
+# moments later, forcing MASQUERADE onto a random source port (symmetric-NAT
+# behaviour) and killing the ICE hole-punch. Real consumer NATs silently drop
+# such packets, so this also makes the topology more faithful.
+iptables -A INPUT -i "$pub_if" -p udp -m conntrack --ctstate NEW -j DROP
+
 # Keep the topology hermetic: without a default route this router (and therefore the
 # NAT'd peers behind it) can only reach its directly-connected subnets, never the
 # docker host gateway or the real internet.
