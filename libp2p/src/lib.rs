@@ -133,6 +133,11 @@ pub use libp2p_websocket as websocket;
 #[cfg(all(feature = "websocket-websys", target_arch = "wasm32"))]
 #[doc(inline)]
 pub use libp2p_websocket_websys as websocket_websys;
+#[cfg(feature = "webtransport")]
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "webtransport")))]
+#[doc(inline)]
+pub use libp2p_webtransport as webtransport;
 #[cfg(all(feature = "webtransport-websys", target_arch = "wasm32"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "webtransport-websys")))]
 #[doc(inline)]

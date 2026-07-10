@@ -66,6 +66,7 @@ members = [
     "transports/webrtc",
     "transports/websocket-websys",
     "transports/websocket",
+    "transports/webtransport",
     "transports/webtransport-websys",
     "wasm-tests/webtransport-tests",
 ]
@@ -117,6 +118,7 @@ libp2p-webrtc-utils = { version = "0.5.0", path = "misc/webrtc-utils" }
 libp2p-webrtc-websys = { version = "0.5.0", path = "transports/webrtc-websys" }
 libp2p-websocket = { version = "0.46.0", path = "transports/websocket" }
 libp2p-websocket-websys = { version = "0.6.0", path = "transports/websocket-websys" }
+libp2p-webtransport = { version = "0.1.0", path = "transports/webtransport" }
 libp2p-webtransport-websys = { version = "0.6.0", path = "transports/webtransport-websys" }
 libp2p-yamux = { version = "0.48.0", path = "muxers/yamux" }
 
@@ -167,6 +169,16 @@ web-time = "1.1.0"
 # we import via `rust-multiaddr`.
 # This is expected to stay here until we move `libp2p-identity` to a separate repository which makes the dependency relationship more obvious.
 libp2p-identity = { path = "identity" }
+
+# wtransport 0.7.1 encodes HTTP/3 pseudo-headers in `HashMap` order, which can place a regular
+# header before the pseudo-headers, violating RFC 9114 §4.3. go-libp2p (quic-go) then rejects the
+# WebTransport CONNECT request stream with H3_MESSAGE_ERROR, so native dials to go-libp2p fail.
+# (The companion lowercase-header-name fix lives in transports/webtransport/src/transport.rs.)
+# Pinned to our own fork carrying the fix from BiagioFesta/wtransport#310 — by rev, on a repo we
+# control, so the ref can't be force-pushed or deleted out from under us.
+# TODO: drop once a wtransport release contains the header-ordering fix.
+wtransport = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
+wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
 
 [workspace.lints]
 rust.unreachable_pub = "warn"

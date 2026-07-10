@@ -34,9 +34,11 @@ use std::sync::Arc;
 use certificate::AlwaysResolvesCert;
 pub use futures_rustls::TlsStream;
 use libp2p_identity::{Keypair, PeerId};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 pub use upgrade::{Config, UpgradeError};
 
-const P2P_ALPN: [u8; 6] = *b"libp2p";
+/// The ALPN protocol identifier negotiated for libp2p connections.
+pub const P2P_ALPN: [u8; 6] = *b"libp2p";
 
 /// Create a TLS client configuration for libp2p.
 pub fn make_client_config(
@@ -90,4 +92,35 @@ pub fn make_server_config(
     crypto.key_log = Arc::new(rustls::KeyLogFile::new());
 
     Ok(crypto)
+}
+
+/// Create a TLS server configuration for a libp2p WebTransport endpoint.
+///
+/// Unlike [`make_server_config`], the libp2p identity is **not** authenticated at the TLS layer
+/// (WebTransport authenticates the peer with a Noise handshake over the first stream, see the
+/// [libp2p WebTransport spec](https://github.com/libp2p/specs/blob/master/webtransport/README.md)).
+/// The server therefore disables client authentication and simply presents the supplied
+/// short-lived self-signed `certificate`, whose SHA-256 hash is advertised in the listen multiaddr.
+/// `protocols` are the ALPN identifiers to offer (typically `h3` for WebTransport).
+pub fn make_webtransport_server_config(
+    certificate: CertificateDer<'static>,
+    private_key: &PrivateKeyDer<'_>,
+    protocols: Vec<Vec<u8>>,
+) -> rustls::ServerConfig {
+    let cert_resolver = Arc::new(
+        AlwaysResolvesCert::new(certificate, private_key)
+            .expect("Server cert key DER is valid; qed"),
+    );
+
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider.cipher_suites = verifier::CIPHERSUITES.to_vec();
+
+    let mut crypto = rustls::ServerConfig::builder_with_provider(provider.into())
+        .with_protocol_versions(verifier::PROTOCOL_VERSIONS)
+        .expect("Cipher suites and kx groups are configured; qed")
+        .with_no_client_auth()
+        .with_cert_resolver(cert_resolver);
+    crypto.alpn_protocols = protocols;
+
+    crypto
 }
