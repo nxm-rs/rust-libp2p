@@ -19,7 +19,6 @@ use libp2p_webrtc::tokio::private;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::test]
-#[ignore = "opens real UDP sockets and runs a full ICE exchange; run with --ignored"]
 async fn two_nodes_connect_via_relay_signalling() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
