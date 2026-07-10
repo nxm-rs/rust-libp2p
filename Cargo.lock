@@ -3465,6 +3465,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "libp2p-quicreuse"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "libp2p-identity",
+ "libp2p-tls",
+ "quinn",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "libp2p-relay"
 version = "0.22.0"
 dependencies = [
