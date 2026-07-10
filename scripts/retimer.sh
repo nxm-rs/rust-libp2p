@@ -13,7 +13,12 @@
 #      where a crate now calls `libp2p_timer::` but did not depend on `futures-timer`.
 #   4. workspace `futures-bounded`: drop the `tokio` feature (re-added only in `misc/timer`), keep
 #      `futures-timer`.
-#   5. completeness oracle: fail if any pre-sweep spelling survives outside `misc/timer`.
+#   5. completeness oracle: fail if any pre-sweep spelling survives outside `misc/timer`, AND fail
+#      if a raw native `tokio::time::{sleep,interval,interval_at,timeout,Instant}` timer is armed in
+#      a shipped library `src/**` outside the allowlist (see `run_oracle`). The pre-sweep spellings
+#      catch what the sweep should have rewritten; the tokio rule catches timers a contributor might
+#      hand-write *directly* against tokio, bypassing `libp2p-timer` entirely and so silently
+#      breaking wasm reachability and paused-time determinism.
 #   6. format with nightly rustfmt (the repo's unstable import options require it).
 
 set -euo pipefail
@@ -39,6 +44,60 @@ run_oracle() {
     fi
     if rg -q --glob '*.rs' -g '!misc/timer/**' '\bDelay::(tokio|futures_timer)\('; then
         echo "retimer oracle: a bare 'Delay::{tokio,futures_timer}(' call survives outside misc/timer" >&2
+        fail=1
+    fi
+
+    # Raw native tokio timers. `futures-timer`/`futures_bounded` are swept above, but nothing stops a
+    # contributor from reaching for `tokio::time::{sleep,interval,interval_at,timeout,Instant}`
+    # directly. Such a timer never flows through `libp2p-timer`, so it is unpausable under
+    # `tokio::time::pause` and does not compile-or-panics on wasm. Fail on any such construction in a
+    # shipped library `src/**`.
+    #
+    # Scope = library crate `src/**` only. Deliberately NOT scanned (native-only binaries, not
+    # shipped production code): `examples/**` and `interop-tests/**`. Also skipped: in-crate
+    # `#[cfg(test)]` modules, which legitimately drive test timeouts against tokio.
+    #
+    # Allowlist of accepted native-only runtime primitives (each wraps tokio's clock on purpose and
+    # is either pausable or off the wasm reachability graph):
+    #   - misc/timer/**                          the abstraction itself
+    #   - transports/quic/src/provider/**        the QUIC runtime-provider seam
+    #   - protocols/mdns/src/behaviour/timer.rs  mdns's periodic provider `Timer` (a `Stream`, which
+    #                                            `libp2p-timer`'s oneshot `Delay` cannot express);
+    #                                            still pausable under tokio `start_paused`, and mdns
+    #                                            has no wasm target.
+    local tokio_timer_re='tokio::time::(sleep|interval|interval_at|timeout|Instant)'
+    # Blank `#[cfg(test)]`-gated modules (brace-balanced) so only production code is scanned. Uses a
+    # POSIX character-class word boundary because gawk reads `\b` as a backspace, not a boundary.
+    local strip_tests='
+        BEGIN { skip = 0; depth = 0; pending = 0 }
+        {
+            if (skip) { depth += gsub(/\{/, "{") - gsub(/\}/, "}"); if (depth <= 0) skip = 0; next }
+            if ($0 ~ /#\[cfg\((all\()?test[,)]/) { pending = 1; next }
+            if (pending && $0 ~ /(^|[^[:alnum:]_])mod[[:space:]][^;]*\{/) {
+                depth = gsub(/\{/, "{") - gsub(/\}/, "}"); skip = (depth > 0); pending = 0; next
+            }
+            if ($0 !~ /^[[:space:]]*#\[/ && $0 !~ /^[[:space:]]*$/) pending = 0
+            print
+        }'
+    local tokio_hits=""
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        if awk "$strip_tests" "$file" | rg -q "$tokio_timer_re"; then
+            tokio_hits="$tokio_hits $file"
+        fi
+    done < <(rg -l \
+        -g '**/src/**/*.rs' \
+        -g '!misc/timer/**' \
+        -g '!transports/quic/src/provider/**' \
+        -g '!protocols/mdns/src/behaviour/timer.rs' \
+        -g '!examples/**' \
+        -g '!interop-tests/**' \
+        "$tokio_timer_re" || true)
+    if [ -n "$tokio_hits" ]; then
+        echo "retimer oracle: a raw 'tokio::time::{sleep,interval,interval_at,timeout,Instant}' timer" \
+             "is armed in shipped library src outside the allowlist:$tokio_hits" >&2
+        echo "  route it through libp2p-timer (Delay), or, if it is a native-only runtime primitive," \
+             "add its path to the allowlist in scripts/retimer.sh." >&2
         fail=1
     fi
     return "$fail"

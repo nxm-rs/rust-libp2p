@@ -56,14 +56,26 @@ mod native {
         time::Duration,
     };
 
-    /// Oneshot timer that binds its backend when it is armed (construction or `reset`).
+    /// Oneshot timer that binds its backend **eagerly, when it is armed** (construction or
+    /// `reset`) — not lazily at first poll.
     ///
-    /// The backend is chosen through [`tokio::runtime::Handle::try_current`]: tokio's clock on a
-    /// runtime (pausable under `tokio::time::pause`) and `futures-timer` off it, so a `Delay` armed
-    /// off-runtime, or never polled, never touches tokio and cannot panic for want of a time
-    /// driver. Arming eagerly rather than at first poll is deliberate: the countdown must run while
-    /// the timer is unpolled, because periodic schedulers arm a `Delay`, suppress polling it while
-    /// a request is running, and then expect the interval to have already elapsed.
+    /// The backend is chosen once, at arm time, through [`tokio::runtime::Handle::try_current`]:
+    /// tokio's clock (a `tokio::time::Sleep`, pausable under `tokio::time::pause`) when armed on a
+    /// runtime, and `futures-timer` when armed off one. That choice is fixed for the timer's life,
+    /// so the panic-safety invariant is a property of *where it is armed versus where it is
+    /// polled*:
+    ///
+    ///   * Armed off any runtime → `futures-timer`; drivable by any executor. Always safe.
+    ///   * Armed on a runtime and polled from within that same runtime context (the common case: a
+    ///     `Delay` is constructed and driven by one swarm task, so construction-context ==
+    ///     poll-context). Safe.
+    ///   * Armed on a runtime but then polled *off* that runtime → the inner `tokio::time::Sleep`
+    ///     can panic for want of an entered time driver, exactly like any hand-rolled tokio
+    ///     `Sleep`. Callers must not move a runtime-armed `Delay` off its runtime to poll it.
+    ///
+    /// Arming eagerly rather than at first poll is deliberate: the countdown must run while the
+    /// timer is unpolled, because periodic schedulers arm a `Delay`, suppress polling it while a
+    /// request is running, and then expect the interval to have already elapsed.
     pub struct Delay(State);
 
     enum State {
