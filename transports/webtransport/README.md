@@ -81,6 +81,17 @@ before this versioning was introduced are not parseable and must be regenerated.
 > authenticated (the version byte is a compatibility discriminator, not integrity protection). Store
 > it with filesystem-level confidentiality — mode `0600` or a secret store.
 
+## Limitations
+
+- **No DCUtR hole punching.** A coordinated hole-punch dial
+  (`DialOpts { role: Endpoint::Listener, port_use: PortUse::New }`) fails with
+  `Error::HolePunchingUnsupported`: `wtransport`'s client endpoint always binds a fresh socket and
+  cannot dial from the listener's socket.
+- **`PortUse::Reuse` is not honoured.** Ordinary dials always bind a fresh ephemeral socket; the
+  reuse request is downgraded best-effort and logged at `trace`.
+
+Both stem from the `wtransport` API, which only exposes `connect` on a client endpoint.
+
 ## License
 
 Licensed under MIT.

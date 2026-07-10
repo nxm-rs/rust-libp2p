@@ -56,6 +56,21 @@
     no longer `pub` (demoted to crate-internal); they returned `wtransport`/`quinn` types and had no
     external callers.
 
+- Spec / idiom polish:
+
+  - Offer only the `h3` ALPN on the server (was `["libp2p", "h3"]`). WebTransport runs over HTTP/3
+    and authenticates libp2p identity over Noise, not in TLS, so the raw QUIC/TLS `libp2p` ALPN is
+    no longer advertised. This matches go-libp2p and the browser WebTransport stack. See [#5].
+  - Honour `DialOpts` in `Transport::dial`. A coordinated hole-punch
+    (`role: Endpoint::Listener, port_use: PortUse::New`) now fails synchronously with the new
+    `Error::HolePunchingUnsupported` variant instead of silently dialing from a fresh socket;
+    `PortUse::Reuse` is downgraded best-effort to a fresh ephemeral socket and logged at `trace`
+    (`wtransport`'s client endpoint cannot reuse the listener's socket). See [#5].
+  - `Error` is now `#[non_exhaustive]`.
+  - Add the standard MIT license header to all source files. See [#5].
+
+[#5]: https://github.com/nxm-rs/rust-libp2p/issues/5
+
 ## 0.1.0
 
 - Certificate rotation (two-certificate scheme).
