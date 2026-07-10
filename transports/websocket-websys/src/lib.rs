@@ -297,6 +297,14 @@ impl Connection {
                     tracing::warn!("Remote is overloading us with messages, closing connection");
                     errored.store(true, Ordering::SeqCst);
 
+                    // Wake the reader so a `poll_read` parked on an empty buffer
+                    // re-runs and observes the error through `error_barrier`,
+                    // closing the connection. Without this wake the error is set
+                    // but never seen: the parked task is the only one that checks
+                    // it, and nothing else ever wakes it, so the connection (and
+                    // the swarm run loop polling it) deadlocks instead of redialing.
+                    new_data_waker.wake();
+
                     return;
                 }
 
@@ -414,7 +422,12 @@ impl AsyncWrite for Connection {
         let array = js_sys::Uint8Array::new_with_length(bytes_to_send as u32);
         array.copy_from(&buf[..bytes_to_send]);
 
-        if this.inner.socket.send_with_array_buffer_view(&array).is_err() {
+        if this
+            .inner
+            .socket
+            .send_with_array_buffer_view(&array)
+            .is_err()
+        {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
 
@@ -590,10 +603,11 @@ mod tests {
         assert_eq!(url, "wss://example.libp2p.direct:31704/");
 
         // Check `/tls/sni/<host>/ws` with `/p2p`
-        let addr =
-            format!("/ip4/116.202.168.171/tcp/31704/tls/sni/example.libp2p.direct/ws/p2p/{peer_id}")
-                .parse()
-                .unwrap();
+        let addr = format!(
+            "/ip4/116.202.168.171/tcp/31704/tls/sni/example.libp2p.direct/ws/p2p/{peer_id}"
+        )
+        .parse()
+        .unwrap();
         let url = extract_websocket_url(&addr).unwrap();
         assert_eq!(url, "wss://example.libp2p.direct:31704/");
 
