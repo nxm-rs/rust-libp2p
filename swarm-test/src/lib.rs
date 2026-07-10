@@ -25,12 +25,26 @@ use futures::{
     FutureExt, StreamExt,
     future::{BoxFuture, Either},
 };
-use libp2p_core::{Multiaddr, multiaddr::Protocol};
+use libp2p_core::{Multiaddr, multiaddr::Protocol, transport::TransportError};
 use libp2p_identity::PeerId;
 use libp2p_swarm::{
     NetworkBehaviour, Swarm, SwarmEvent,
     dial_opts::{DialOpts, PeerCondition},
 };
+
+/// Oneshot timer for swarm-test's event deadlines.
+///
+/// Native rides tokio's clock so `tokio::time::pause` drives the deadline under test; wasm32 keeps
+/// the runtime-agnostic global timer.
+#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+fn deadline(duration: Duration) -> impl std::future::Future<Output = ()> + Unpin {
+    Box::pin(tokio::time::sleep(duration))
+}
+
+#[cfg(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown"))]
+fn deadline(duration: Duration) -> impl std::future::Future<Output = ()> + Unpin {
+    futures_timer::Delay::new(duration)
+}
 
 /// An extension trait for [`Swarm`] that makes it
 /// easier to set up a network of [`Swarm`]s for tests.
@@ -474,11 +488,8 @@ where
     }
 
     async fn next_swarm_event(&mut self) -> SwarmEvent<<Self::NB as NetworkBehaviour>::ToSwarm> {
-        match futures::future::select(
-            futures_timer::Delay::new(Duration::from_secs(10)),
-            self.select_next_some(),
-        )
-        .await
+        match futures::future::select(deadline(Duration::from_secs(10)), self.select_next_some())
+            .await
         {
             Either::Left(((), _)) => panic!("Swarm did not emit an event within 10s"),
             Either::Right((event, _)) => {
@@ -563,27 +574,36 @@ where
                 })
                 .await;
 
-            let tcp_addr_listener_id = swarm
-                .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-                .unwrap();
+            // Memory-only stacks reject a TCP multiaddr, so skip the TCP listener when the
+            // transport does not support it and fall back to the memory address in that slot.
+            let tcp_multiaddr = match swarm.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()) {
+                Ok(tcp_addr_listener_id) => {
+                    let addr = swarm
+                        .wait(|e| match e {
+                            SwarmEvent::NewListenAddr {
+                                address,
+                                listener_id,
+                            } => (listener_id == tcp_addr_listener_id).then_some(address),
+                            other => {
+                                panic!(
+                                    "Unexpected event while waiting for `NewListenAddr`: {other:?}"
+                                )
+                            }
+                        })
+                        .await;
 
-            let tcp_multiaddr = swarm
-                .wait(|e| match e {
-                    SwarmEvent::NewListenAddr {
-                        address,
-                        listener_id,
-                    } => (listener_id == tcp_addr_listener_id).then_some(address),
-                    other => {
-                        panic!("Unexpected event while waiting for `NewListenAddr`: {other:?}")
+                    if self.add_tcp_external {
+                        swarm.add_external_address(addr.clone());
                     }
-                })
-                .await;
+
+                    addr
+                }
+                Err(TransportError::MultiaddrNotSupported(_)) => memory_multiaddr.clone(),
+                Err(e) => panic!("Unexpected error while listening on TCP: {e:?}"),
+            };
 
             if self.add_memory_external {
                 swarm.add_external_address(memory_multiaddr.clone());
-            }
-            if self.add_tcp_external {
-                swarm.add_external_address(tcp_multiaddr.clone());
             }
 
             (memory_multiaddr, tcp_multiaddr)
@@ -638,5 +658,17 @@ mod tests {
         ));
 
         assert!(!held);
+    }
+
+    #[tokio::test]
+    async fn memory_only_swarm_can_listen() {
+        let mut swarm = Swarm::new_ephemeral_memory_tokio(|_| dummy::Behaviour);
+
+        // A memory-only transport rejects TCP, so `listen()` must not panic; the TCP slot falls
+        // back to the memory address.
+        let (memory_addr, tcp_addr) = swarm.listen().await;
+
+        assert!(memory_addr.iter().any(|p| matches!(p, Protocol::Memory(_))));
+        assert_eq!(memory_addr, tcp_addr);
     }
 }

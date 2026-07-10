@@ -3566,6 +3566,7 @@ dependencies = [
  "libp2p-swarm",
  "libp2p-tcp",
  "libp2p-yamux",
+ "tokio",
  "tracing",
 ]
 
