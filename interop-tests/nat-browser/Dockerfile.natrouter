@@ -1,0 +1,12 @@
+# MASQUERADE NAT router between a lan and the pub network.
+#
+# Needs: --cap-add=NET_ADMIN and --sysctl net.ipv4.ip_forward=1 (set in the compose
+# file; /proc/sys is read-only inside the container otherwise).
+FROM alpine:3.20
+
+RUN apk add --no-cache iptables
+
+COPY scripts/nat-entrypoint.sh /usr/local/bin/nat-entrypoint.sh
+RUN chmod +x /usr/local/bin/nat-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/nat-entrypoint.sh"]
