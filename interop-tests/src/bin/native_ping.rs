@@ -26,6 +26,7 @@ async fn main() -> Result<()> {
         config.sec_protocol,
         config.muxer,
         relay_addr,
+        config.ice_server,
     )
     .await?;
 

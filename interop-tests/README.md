@@ -48,8 +48,13 @@ never on the relayed one.
 The relay is spawned automatically by the listener side (in `native_ping` itself, or in
 the native `wasm_ping` wrapper for a browser listener) and listens on a websocket
 multiaddr on the configured `ip`. To use an external relay instead, set
-`relay_addr=<multiaddr ending in /p2p/<relay-peer-id>>`. For native peers an optional
-`ice_server=stun:<host>:<port>` adds a STUN server to the ICE agent.
+`relay_addr=<multiaddr ending in /p2p/<relay-peer-id>>`. An optional
+`ice_server=stun:<host>:<port>` adds a STUN/TURN server to the ICE agent; for browser
+peers the `wasm_ping` wrapper threads it into the page, so it works for both native
+and wasm sides. Both knobs are required behind NAT, where the in-process relay would
+be unreachable and ICE needs server-reflexive candidates: see `nat-browser/` for a
+ready-made double-NAT + coturn docker topology and a standalone relay
+(`cargo run --bin relay`).
 
 The in-fork matrix is native/browser on each side, all four cells over the same
 harness. Prerequisites: redis, and for browser cells `chromedriver` in `$PATH` plus

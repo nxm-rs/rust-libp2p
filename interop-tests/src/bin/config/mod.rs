@@ -15,6 +15,9 @@ pub(crate) struct Config {
     /// including the `/p2p/<relay-peer-id>` suffix. When absent, the listener spawns an
     /// in-process relay.
     pub(crate) relay_addr: Option<String>,
+    /// Optional STUN/TURN url (e.g. `stun:1.2.3.4:3478`) handed to the `/webrtc`
+    /// transport. Required behind NAT, where ICE needs server-reflexive candidates.
+    pub(crate) ice_server: Option<String>,
 }
 
 impl Config {
@@ -35,6 +38,7 @@ impl Config {
         let sec_protocol = env::var("security").ok();
         let muxer = env::var("muxer").ok();
         let relay_addr = env::var("relay_addr").ok();
+        let ice_server = env::var("ice_server").ok();
 
         Ok(Self {
             transport,
@@ -45,6 +49,7 @@ impl Config {
             test_timeout,
             redis_addr,
             relay_addr,
+            ice_server,
         })
     }
 }
