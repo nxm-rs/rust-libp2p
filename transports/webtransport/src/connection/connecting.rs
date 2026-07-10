@@ -33,7 +33,7 @@ use futures::{
 use libp2p_core::upgrade::InboundConnectionUpgrade;
 use libp2p_identity::PeerId;
 use libp2p_timer::Delay;
-use wtransport::endpoint::SessionRequest;
+use wtransport::endpoint::{IncomingSessionFuture, SessionRequest};
 
 use crate::{Connection, Error};
 
@@ -45,20 +45,38 @@ pub struct Connecting {
 }
 
 impl Connecting {
+    /// Negotiates a WebTransport session over a QUIC connection routed to this transport by the
+    /// shared endpoint holder. `timeout` covers the whole inbound handshake: QUIC completion,
+    /// the HTTP/3 CONNECT exchange, and the Noise authentication.
     pub fn new(
-        session_request: SessionRequest,
+        connecting: quinn::Connecting,
         noise_config: libp2p_noise::Config,
         timeout: Duration,
     ) -> Self {
         Connecting {
             connecting: select(
-                Self::handshake(session_request, noise_config).boxed(),
+                Self::handshake(connecting, noise_config).boxed(),
                 Delay::new(timeout),
             ),
         }
     }
 
     async fn handshake(
+        connecting: quinn::Connecting,
+        noise_config: libp2p_noise::Config,
+    ) -> Result<(PeerId, Connection), Error> {
+        let session_request = IncomingSessionFuture::with_quic_connecting(connecting).await?;
+
+        tracing::debug!(
+            path = session_request.path(),
+            remote = %session_request.remote_address(),
+            "incoming WebTransport session request"
+        );
+
+        Self::session_handshake(session_request, noise_config).await
+    }
+
+    async fn session_handshake(
         session_request: SessionRequest,
         noise_config: libp2p_noise::Config,
     ) -> Result<(PeerId, Connection), Error> {

@@ -19,7 +19,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     pin::Pin,
@@ -28,7 +28,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{future::BoxFuture, prelude::*, ready, stream::SelectAll};
+use futures::{channel::mpsc, future::BoxFuture, prelude::*, ready, stream::SelectAll};
 use if_watch::{IfEvent, tokio::IfWatcher};
 use libp2p_core::{
     Endpoint as CoreEndpoint, Multiaddr,
@@ -37,12 +37,13 @@ use libp2p_core::{
     upgrade::OutboundConnectionUpgrade,
 };
 use libp2p_identity::{Keypair, PeerId};
+use libp2p_quicreuse::SharedQuicEndpoint;
 use socket2::{Domain, Socket, Type};
 use time::OffsetDateTime;
 use wtransport::{
-    ClientConfig, ServerConfig,
-    endpoint::{ConnectOptions, Endpoint, SessionRequest, endpoint_side::Server},
-    error::ConnectionError,
+    ClientConfig,
+    config::{QuicTransportConfig, TlsServerConfig},
+    endpoint::{ConnectOptions, connect_over_quic},
     tls::Sha256Digest,
 };
 
@@ -51,7 +52,7 @@ use crate::{
     certificate::{
         CERT_VALID_PERIOD, CLOCK_SKEW_ALLOWANCE, CertHash, Certificate, MULTIHASH_SHA256_CODE,
     },
-    config::{Config, QuicParams, alpn_protocols},
+    config::{Config, QuicParams, WEBTRANSPORT_ALPN, alpn_protocols},
     connection::{Connection, WEBTRANSPORT_PATH},
 };
 
@@ -65,21 +66,117 @@ const ROTATE_BEFORE_EXPIRY: time::Duration = CLOCK_SKEW_ALLOWANCE;
 /// listener on a transient failure.
 const GENERATION_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Capacity of the queue between an endpoint holder's accept loop and a [`Listener`].
+///
+/// The holder drops inbound connections instead of applying backpressure, so this bounds how
+/// large an accept burst survives a listener that is slow to be polled.
+const INBOUND_QUEUE_LEN: usize = 256;
+
 pub struct Transport {
     config: Config,
 
     listeners: SelectAll<Listener>,
+    /// Shared endpoint provided at construction, used by listeners and reuse-dials whose
+    /// address matches it.
+    shared_endpoint: Option<Arc<SharedQuicEndpoint>>,
+    /// Fresh-socket dialer holders, keyed by socket family, used when no eligible listener exists
+    /// to reuse. Mirrors `libp2p-quic`'s `GenTransport::dialer`: a `PortUse::Reuse` dial without a
+    /// listener reuses a per-family ephemeral holder; a `PortUse::New` dial gets a throwaway one.
+    dialer: HashMap<SocketFamily, Arc<SharedQuicEndpoint>>,
     /// Waker to poll the transport again when a new listener is added.
     waker: Option<Waker>,
 }
 
 impl Transport {
     pub fn new(config: Config) -> Self {
+        Self::new_inner(config, None)
+    }
+
+    /// Creates a transport that listens and reuse-dials through `shared`, co-listening with the
+    /// other protocols registered on the same endpoint (one UDP port, demultiplexed by ALPN).
+    ///
+    /// [`libp2p_core::Transport::listen_on`] uses `shared` when the requested address matches
+    /// its bound address (an explicit port of `0` matches); other addresses fall back to a
+    /// private endpoint, exactly as with [`Transport::new`].
+    pub fn with_shared_endpoint(config: Config, shared: Arc<SharedQuicEndpoint>) -> Self {
+        Self::new_inner(config, Some(shared))
+    }
+
+    fn new_inner(config: Config, shared_endpoint: Option<Arc<SharedQuicEndpoint>>) -> Self {
         Transport {
             config,
             listeners: SelectAll::new(),
+            shared_endpoint,
+            dialer: HashMap::new(),
             waker: None,
         }
+    }
+
+    /// The shared endpoint, if it is bound to an address that can serve `socket_addr`.
+    fn matching_shared_endpoint(&self, socket_addr: SocketAddr) -> Option<Arc<SharedQuicEndpoint>> {
+        let shared = self.shared_endpoint.as_ref()?;
+        let local_addr = shared.local_addr();
+        (socket_addr.ip() == local_addr.ip()
+            && (socket_addr.port() == local_addr.port() || socket_addr.port() == 0))
+            .then(|| Arc::clone(shared))
+    }
+
+    /// Pick an eligible (open, same-family, loopback-compatible) listener whose **endpoint
+    /// holder** can be used to dial `socket_addr`. Dialing from the listener's holder reuses the
+    /// listener's UDP socket, preserving the NAT 4-tuple exactly as `libp2p-quic` does for
+    /// `PortUse::Reuse`. This is the prerequisite for WebTransport hole punching.
+    fn eligible_listener_holder(
+        &self,
+        socket_addr: &SocketAddr,
+    ) -> Option<Arc<SharedQuicEndpoint>> {
+        self.listeners
+            .iter()
+            .filter(|l| !l.is_closed)
+            .filter(|l| SocketFamily::is_same(&l.socket_addr().ip(), &socket_addr.ip()))
+            .filter(|l| {
+                // For a loopback target, only a loopback listener is eligible.
+                if socket_addr.ip().is_loopback() {
+                    l.socket_addr().ip().is_loopback()
+                } else {
+                    true
+                }
+            })
+            .map(|l| Arc::clone(&l.holder))
+            .next()
+    }
+
+    /// Build (or reuse) a fresh-socket dialer holder of the right family.
+    ///
+    /// With `reuse == true` the constructor-provided shared endpoint is preferred when its
+    /// family matches, then a single cached ephemeral holder per family (so repeated dials share
+    /// one socket); with `reuse == false` a throwaway holder is returned (used by the
+    /// `(Listener, New)` hole-punch path, which wants its own socket spraying packets).
+    fn dialer_holder(
+        &mut self,
+        socket_addr: SocketAddr,
+        reuse: bool,
+    ) -> Result<Arc<SharedQuicEndpoint>, Error> {
+        let family: SocketFamily = socket_addr.ip().into();
+        if reuse {
+            if let Some(shared) = &self.shared_endpoint
+                && SocketFamily::from(shared.local_addr().ip()) == family
+            {
+                return Ok(Arc::clone(shared));
+            }
+            if let Some(holder) = self.dialer.get(&family) {
+                return Ok(Arc::clone(holder));
+            }
+        }
+        let bind_addr: SocketAddr = match family {
+            SocketFamily::Ipv4 => (Ipv4Addr::UNSPECIFIED, 0).into(),
+            SocketFamily::Ipv6 => (Ipv6Addr::UNSPECIFIED, 0).into(),
+        };
+        let socket = create_socket(bind_addr)?;
+        let holder = Arc::new(new_holder(socket)?);
+        if reuse {
+            self.dialer.insert(family, Arc::clone(&holder));
+        }
+        Ok(holder)
     }
 }
 
@@ -116,26 +213,42 @@ impl libp2p_core::Transport for Transport {
             }
         }
 
-        let socket = create_socket(socket_addr).map_err(Self::Error::from)?;
+        // Use the constructor-provided shared endpoint when the requested address matches it;
+        // otherwise bind a private single-protocol holder for this listener.
+        let (holder, owns_holder) = match self.matching_shared_endpoint(socket_addr) {
+            Some(shared) => (shared, false),
+            None => {
+                let socket = create_socket(socket_addr).map_err(Self::Error::from)?;
+                let holder = new_holder(socket).map_err(TransportError::Other)?;
+                (Arc::new(holder), true)
+            }
+        };
+        let local_addr = holder.local_addr();
 
-        let server_tls_config = self.config.server_tls_config();
-        let quic_transport_config = self.config.get_quic_transport_config();
+        // Register the h3 ALPN with the complete WebTransport server config (no client auth,
+        // certhash-pinned certificate); the holder routes matching inbound connections here.
+        let server_config = make_quinn_server_config(
+            self.config.server_tls_config(),
+            self.config.get_quic_transport_config(),
+        )
+        .map_err(TransportError::Other)?;
+        let (sink, inbound) = mpsc::channel(INBOUND_QUEUE_LEN);
+        holder
+            // WebTransport (no client auth) is never the fallback route (`default: false`); on a
+            // shared endpoint the mutual-auth libp2p/QUIC route stays the default for unknown
+            // ALPNs.
+            .register(
+                WEBTRANSPORT_ALPN.to_vec(),
+                alpn_protocols(),
+                Arc::new(server_config),
+                sink,
+                false,
+            )
+            .map_err(|e| TransportError::Other(holder_error(e)))?;
 
-        // Hand the single bound socket to wtransport; do not clone it. The bound address is read
-        // back from the endpoint below.
-        let config = ServerConfig::builder()
-            .with_bind_socket(socket)
-            .with_custom_tls_and_transport(server_tls_config, quic_transport_config)
-            .build();
-
-        let endpoint =
-            wtransport::Endpoint::server(config).map_err(|e| TransportError::Other(e.into()))?;
-        let local_addr = endpoint
-            .local_addr()
-            .map_err(|e| TransportError::Other(Error::from(e)))?;
         let keypair = &self.config.keypair;
         // The listener owns its own copy of the certificate set and QUIC config so it can rebuild
-        // the endpoint TLS config during rotation without holding the (non-`Clone`) `Config`.
+        // the server config during rotation without holding the (non-`Clone`) `Config`.
         let certs = self.config.certs().to_vec();
         let quic_params = self.config.quic_params();
         let handshake_timeout = self.config.handshake_timeout;
@@ -145,13 +258,19 @@ impl libp2p_core::Transport for Transport {
         let listener = Listener::new(
             id,
             local_addr,
-            endpoint,
+            holder,
+            owns_holder,
+            inbound,
             keypair,
             certs,
             quic_params,
             handshake_timeout,
         )?;
         self.listeners.push(listener);
+
+        // Drop the cached per-family dialer holder: new reuse-dials go through the listener's
+        // holder, and the cached one disappears once its last connection closes.
+        self.dialer.remove(&socket_addr.ip().into());
 
         if let Some(waker) = self.waker.take() {
             waker.wake();
@@ -176,15 +295,16 @@ impl libp2p_core::Transport for Transport {
 
     /// Dials a WebTransport address.
     ///
-    /// Two behaviours are non-obvious:
+    /// The QUIC connection is established from an endpoint holder chosen from the `(role,
+    /// port_use)` tuple (mirroring `libp2p-quic`), then the WebTransport/H3 session is driven over
+    /// that connection via [`connect_over_quic`]:
     ///
-    /// * A genuine coordinated hole-punch — `DialOpts { role: Endpoint::Listener, port_use:
-    ///   PortUse::New, .. }` — is rejected synchronously with [`Error::HolePunchingUnsupported`]:
-    ///   `wtransport` only exposes `connect` on a *client* endpoint, which always binds a fresh
-    ///   socket, so dialing from the listener's socket is impossible.
-    /// * [`PortUse::Reuse`] (the default for ordinary dials, and what DCUtR's `override_role()`
-    ///   emits as `(Listener, Reuse)`) cannot be honoured; it is downgraded best-effort to a fresh
-    ///   ephemeral socket and logged at `trace`.
+    /// * [`PortUse::Reuse`] (the default, and what DCUtR emits as `(Listener, Reuse)`) dials from
+    ///   an existing listener's holder (its UDP socket) when one exists, else from a cached
+    ///   per-family ephemeral dialer holder.
+    /// * `(Listener, PortUse::New)` (a coordinated DCUtR hole-punch) also dials from the listener's
+    ///   holder, so the WT session rides the hole-punched socket.
+    /// * `(Dialer, PortUse::New)` dials from a throwaway fresh ephemeral holder.
     fn dial(
         &mut self,
         addr: Multiaddr,
@@ -202,34 +322,39 @@ impl libp2p_core::Transport for Transport {
             return Err(TransportError::Other(Error::MissingCerthashes));
         }
 
-        // Branch on the (role, port_use) tuple, matching libp2p-quic. Only a genuine coordinated
-        // hole-punch — role == Listener AND port_use == New — needs to dial from the listener's
-        // socket, which `wtransport` cannot do. `(Listener, Reuse)` is what DCUtR's
-        // `override_role()` emits and what quic treats as a normal reuse dial; we serve it as an
-        // ordinary fresh-socket dial.
-        match (opts.role, opts.port_use) {
-            (CoreEndpoint::Listener, PortUse::New) => {
-                return Err(TransportError::Other(Error::HolePunchingUnsupported));
-            }
-            (_, PortUse::Reuse) => {
-                // `PortUse::Reuse` (the default for ordinary dials) cannot be honoured:
-                // `wtransport` binds a fresh socket per client endpoint and offers no way to share
-                // the listener's socket without two quinn endpoints racing recv() on one fd.
-                // Best-effort downgrade to a fresh ephemeral socket; logged at `trace` because it
-                // is the expected default path, not an exceptional event.
-                tracing::trace!(
-                    %addr,
-                    "WebTransport ignores PortUse::Reuse; dialing from a fresh ephemeral socket"
-                );
-            }
-            _ => {}
-        }
+        // Branch on the (role, port_use) tuple, matching libp2p-quic. The holder selected here
+        // determines which UDP socket the QUIC connection is dialed from, which is what makes (or
+        // breaks) hole punching:
+        //
+        // * `PortUse::Reuse` (the default for ordinary dials, and what DCUtR's `override_role()`
+        //   emits as `(Listener, Reuse)`) -> dial from the listener's holder when one exists, else
+        //   from a cached per-family ephemeral dialer holder. Reusing the listener socket preserves
+        //   the NAT 4-tuple.
+        // * `(Listener, New)` (a coordinated DCUtR hole-punch) -> dial from the listener's holder
+        //   too, so the WT session is driven over the hole-punched socket.
+        // * `(Dialer, New)` -> a throwaway fresh ephemeral holder.
+        let holder = match (opts.role, opts.port_use) {
+            (_, PortUse::Reuse) | (CoreEndpoint::Listener, PortUse::New) => self
+                .eligible_listener_holder(&socket_addr)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    // No listener to reuse. For `Reuse` keep a shared per-family dialer holder;
+                    // for a `(Listener, New)` hole-punch without a listener there is nothing to
+                    // punch from, so fall back to a fresh socket as well (best effort).
+                    let reuse = opts.port_use == PortUse::Reuse;
+                    self.dialer_holder(socket_addr, reuse)
+                })
+                .map_err(TransportError::Other)?,
+            (CoreEndpoint::Dialer, PortUse::New) => self
+                .dialer_holder(socket_addr, false)
+                .map_err(TransportError::Other)?,
+        };
 
         let keypair = self.config.keypair.clone();
         let handshake_timeout = self.config.handshake_timeout;
 
         Ok(async move {
-            let connect = connect(socket_addr, cert_hashes, expected_peer_id, keypair);
+            let connect = connect(holder, socket_addr, cert_hashes, expected_peer_id, keypair);
             futures::pin_mut!(connect);
             match future::select(connect, libp2p_timer::Delay::new(handshake_timeout)).await {
                 future::Either::Left((res, _)) => res,
@@ -257,18 +382,20 @@ impl libp2p_core::Transport for Transport {
 struct Listener {
     /// Id of the listener.
     listener_id: ListenerId,
-    /// Endpoint
-    endpoint: Arc<Endpoint<Server>>,
-    /// The bound local address, cached from [`Endpoint::local_addr`] at construction. Used to make
-    /// [`Self::socket_addr`] infallible and to supply the bind address to the rebuilt
-    /// [`ServerConfig`] on rotation (where [`Endpoint::reload_config`] with `rebind = false`
-    /// ignores it, so no socket is rebound and live connections are preserved).
+    /// Endpoint holder this listener registered the `h3` ALPN on. Dials with [`PortUse::Reuse`]
+    /// go through it so they originate from the listening port.
+    holder: Arc<SharedQuicEndpoint>,
+    /// Whether the holder is private to this listener (created by `listen_on`) and must be
+    /// closed with it, as opposed to an externally shared endpoint that outlives the listener.
+    owns_holder: bool,
+    /// The bound local address, cached from the holder at construction, so
+    /// [`Self::socket_addr`] is infallible.
     local_addr: SocketAddr,
     /// Watcher for network interface changes.
     /// None if we are only listening on a single interface.
     if_watcher: Option<IfWatcher>,
-    /// A future to poll new incoming connections.
-    accept: BoxFuture<'static, Result<SessionRequest, ConnectionError>>,
+    /// Inbound connections routed to this listener by the holder's accept loop.
+    inbound: mpsc::Receiver<quinn::Connecting>,
     /// Timeout for connection establishment on inbound connections.
     handshake_timeout: Duration,
     /// Whether the listener was closed and the stream should terminate.
@@ -303,27 +430,22 @@ struct Listener {
 }
 
 impl Listener {
-    /// Build a listener around an already-bound endpoint.
+    /// Build a listener around an endpoint holder it has already registered the `h3` ALPN on.
     ///
-    /// Takes `local_addr` (the endpoint's bound address, read by the caller from
-    /// [`Endpoint::local_addr`]) rather than the [`UdpSocket`]: the socket is owned by the endpoint
-    /// and the listener never needs it directly. Caching the address here keeps
-    /// [`Self::socket_addr`] infallible and lets rotation rebuild the [`ServerConfig`] without
-    /// touching the socket.
+    /// Takes `local_addr` (the holder's bound address) so [`Self::socket_addr`] is infallible;
+    /// the socket itself is owned by the holder and the listener never needs it directly.
     #[allow(clippy::too_many_arguments)]
     fn new(
         listener_id: ListenerId,
         local_addr: SocketAddr,
-        endpoint: Endpoint<Server>,
+        holder: Arc<SharedQuicEndpoint>,
+        owns_holder: bool,
+        inbound: mpsc::Receiver<quinn::Connecting>,
         keypair: &Keypair,
         certs: Vec<Certificate>,
         quic_params: QuicParams,
         handshake_timeout: Duration,
     ) -> Result<Self, Error> {
-        let endpoint = Arc::new(endpoint);
-        let c_endpoint = Arc::clone(&endpoint);
-        let accept = Self::accept(c_endpoint, listener_id).boxed();
-
         // Initial advertised set: no expired generation yet, so just the live certs.
         let cert_hashes: Vec<CertHash> = certs.iter().map(|c| c.cert_hash()).collect();
 
@@ -345,10 +467,11 @@ impl Listener {
 
         Ok(Listener {
             listener_id,
-            endpoint,
+            holder,
+            owns_holder,
             local_addr,
             if_watcher,
-            accept,
+            inbound,
             handshake_timeout,
             is_closed: false,
             pending_events,
@@ -363,27 +486,18 @@ impl Listener {
         })
     }
 
-    async fn accept(
-        endpoint: Arc<Endpoint<Server>>,
-        id: ListenerId,
-    ) -> Result<SessionRequest, ConnectionError> {
-        let incoming_session = endpoint.accept().await;
-
-        tracing::debug!(
-            "Listener {id} got incoming session from {}",
-            incoming_session.remote_address()
-        );
-
-        incoming_session.await
-    }
-
     /// Report the listener as closed in a [`TransportEvent::ListenerClosed`] and
     /// terminate the stream.
     fn close(&mut self, reason: Result<(), Error>) {
         if self.is_closed {
             return;
         }
-        self.endpoint.close(From::from(0u32), &[]);
+        self.holder.unregister(WEBTRANSPORT_ALPN);
+        if self.owns_holder {
+            // A private holder serves only this listener: closing it drops its connections
+            // immediately, exactly as closing a privately owned endpoint used to.
+            self.holder.close(From::from(0u32), &[]);
+        }
         // Stop rotation: do not enqueue further address events, and ensure `ListenerClosed` is the
         // last event delivered. Any address events already queued ahead of it still drain first.
         self.is_closed = true;
@@ -399,8 +513,8 @@ impl Listener {
         }
     }
 
-    /// The bound local address. Infallible: cached from [`Endpoint::local_addr`] at construction,
-    /// so this is reachable on every inbound session and interface event without a per-connection
+    /// The bound local address. Infallible: cached from the holder at construction, so this is
+    /// reachable on every inbound session and interface event without a per-connection
     /// `.expect()`.
     fn socket_addr(&self) -> SocketAddr {
         self.local_addr
@@ -565,25 +679,20 @@ impl Listener {
             return Ok(());
         }
 
-        // 5. Atomic swap, in order: rebuild full ServerConfig -> reload_config(.., false) -> update
-        //    cert_hashes -> emit AddressExpired then NewAddress. Update `cert_hashes` together with
-        //    the reload so no inbound handshake completes for a cert whose hash is absent from the
-        //    Noise set. With rebind=false the reload only swaps the TLS/QUIC config and leaves the
-        //    socket and live connections intact.
+        // 5. Atomic swap, in order: rebuild the full server config -> swap it in the holder's
+        //    config map -> update cert_hashes -> emit AddressExpired then NewAddress. Update
+        //    `cert_hashes` together with the swap so no inbound handshake completes for a cert
+        //    whose hash is absent from the Noise set. The swap affects new inbound connections
+        //    only; the socket and live connections are untouched.
         let tls = libp2p_tls::make_webtransport_server_config(
             self.certs[0].certificate_der(),
             &self.certs[0].private_key_der(),
             alpn_protocols(),
         );
-        // `reload_config(.., false)` ignores the bind address (it does not rebind the socket), so
-        // we pass the cached `local_addr` purely to satisfy the builder; no socket is
-        // created or cloned and live connections are preserved.
-        let server_config = ServerConfig::builder()
-            .with_bind_address(self.local_addr)
-            .with_custom_tls_and_transport(tls, self.quic_params.build())
-            .build();
-
-        self.endpoint.reload_config(server_config, false)?;
+        let server_config = make_quinn_server_config(tls, self.quic_params.build())?;
+        self.holder
+            .update_server_config(WEBTRANSPORT_ALPN, alpn_protocols(), Arc::new(server_config))
+            .map_err(holder_error)?;
         self.cert_hashes = new_hashes;
 
         // 6. Re-advertise: AddressExpired(old) then NewAddress(new), per interface.
@@ -669,35 +778,29 @@ impl Stream for Listener {
                 return Poll::Ready(Some(event));
             }
 
-            match self.accept.poll_unpin(cx) {
-                Poll::Ready(Ok(session_request)) => {
+            match self.inbound.poll_next_unpin(cx) {
+                Poll::Ready(Some(connecting)) => {
                     tracing::debug!(
-                        "Listener {} got session request={:?}",
+                        "Listener {} got inbound connection from {}",
                         &self.listener_id,
-                        session_request.path()
+                        connecting.remote_address()
                     );
 
-                    let endpoint = Arc::clone(&self.endpoint);
-                    self.accept = Self::accept(endpoint, self.listener_id).boxed();
                     let local_addr =
                         socketaddr_to_multiaddr_with_hashes(&self.socket_addr(), &self.cert_hashes);
-
-                    let remote_addr = session_request.remote_address();
-                    let send_back_addr = socketaddr_to_multiaddr(&remote_addr);
+                    let send_back_addr = socketaddr_to_multiaddr(&connecting.remote_address());
                     let noise = self.noise_config();
 
                     let event = TransportEvent::Incoming {
-                        upgrade: Connecting::new(session_request, noise, self.handshake_timeout),
+                        upgrade: Connecting::new(connecting, noise, self.handshake_timeout),
                         local_addr,
                         send_back_addr,
                         listener_id: self.listener_id,
                     };
                     return Poll::Ready(Some(event));
                 }
-                Poll::Ready(Err(connection_error)) => {
-                    tracing::error!("Got the error {}", connection_error);
-                    self.close(Err(Error::Connection(connection_error)));
-
+                Poll::Ready(None) => {
+                    self.close(Ok(()));
                     continue;
                 }
                 Poll::Pending => {
@@ -759,6 +862,54 @@ fn create_socket(socket_addr: SocketAddr) -> io::Result<UdpSocket> {
     socket.bind(&socket_addr.into())?;
 
     Ok(socket.into())
+}
+
+/// Wrap an already-bound UDP socket into a single-protocol endpoint holder. Until an ALPN is
+/// registered the holder only dials; registering `h3` turns it into a listener.
+fn new_holder(socket: UdpSocket) -> Result<SharedQuicEndpoint, Error> {
+    SharedQuicEndpoint::new(quinn::EndpointConfig::default(), socket).map_err(holder_error)
+}
+
+/// Maps an endpoint holder error onto this transport's error type.
+fn holder_error(err: libp2p_quicreuse::Error) -> Error {
+    match err {
+        libp2p_quicreuse::Error::Io(e) => Error::Io(e),
+        e => Error::Io(io::Error::other(e)),
+    }
+}
+
+/// Builds the complete `quinn::ServerConfig` registered with the endpoint holder for the `h3`
+/// ALPN: the WebTransport TLS config (no client auth, certhash-pinned self-signed certificate)
+/// plus the QUIC transport parameters.
+fn make_quinn_server_config(
+    tls: TlsServerConfig,
+    transport: QuicTransportConfig,
+) -> Result<quinn::ServerConfig, Error> {
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
+        .map_err(|e| Error::Io(io::Error::other(e)))?;
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    server_config.transport_config(Arc::new(transport));
+    Ok(server_config)
+}
+
+/// Build the dialer-side `quinn::ClientConfig` that pins the server's self-signed certificate by
+/// its SHA-256 hash(es) and negotiates the `h3` ALPN.
+///
+/// We reuse `wtransport`'s `ClientConfig` builder purely to obtain a correctly-configured
+/// `quinn::ClientConfig` (cert-hash verifier + `h3` ALPN + TLS1.3 cipher suite); the bind address
+/// it carries is irrelevant here because we drive the connection over an endpoint we already own.
+fn client_quic_config(cert_hashes: &[CertHash]) -> Result<quinn::ClientConfig, Error> {
+    let digests = cert_hashes
+        .iter()
+        .map(certhash_to_digest)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let client_config = ClientConfig::builder()
+        .with_bind_default()
+        .with_server_certificate_hashes(digests)
+        .build();
+
+    Ok(client_config.quic_config().clone())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -903,35 +1054,24 @@ fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Option<(SocketAddr, Option<PeerI
 /// handshake (as the initiator) over the first bidirectional stream to authenticate the remote
 /// [`PeerId`].
 async fn connect(
+    holder: Arc<SharedQuicEndpoint>,
     socket_addr: SocketAddr,
     cert_hashes: Vec<CertHash>,
     expected_peer_id: Option<PeerId>,
     keypair: Keypair,
 ) -> Result<(PeerId, Connection), Error> {
-    // Always bind a fresh ephemeral local UDP socket of the same address family as the remote;
-    // `PortUse::Reuse` is unsupported by design (see `Transport::dial`), since `wtransport`'s
-    // client endpoint cannot share the listener's socket.
-    let bind_addr: SocketAddr = if socket_addr.is_ipv6() {
-        (Ipv6Addr::UNSPECIFIED, 0).into()
-    } else {
-        (Ipv4Addr::UNSPECIFIED, 0).into()
-    };
-
     // Pin the server's plain self-signed certificate by its SHA-256 hash(es), exactly like a
-    // browser's `serverCertificateHashes`. The libp2p identity is authenticated separately over
-    // Noise, so no certificate-embedded identity is required (this is what lets us interoperate
-    // with go-libp2p and browser endpoints).
-    let digests = cert_hashes
-        .iter()
-        .map(certhash_to_digest)
-        .collect::<Result<Vec<_>, _>>()?;
+    // browser's `serverCertificateHashes`, and negotiate the `h3` ALPN. The libp2p identity is
+    // authenticated separately over Noise, so no certificate-embedded identity is required (this is
+    // what lets us interoperate with go-libp2p and browser endpoints).
+    let client_config = client_quic_config(&cert_hashes)?;
 
-    let client_config = ClientConfig::builder()
-        .with_bind_address(bind_addr)
-        .with_server_certificate_hashes(digests)
-        .build();
-
-    let endpoint = Endpoint::client(client_config)?;
+    // Establish the raw QUIC connection ourselves, from the *provided* holder. When that holder
+    // is the listener's, this connection is dialed from the listener's UDP socket, the same
+    // socket sharing that lets raw QUIC hole punch. The `"l"` server name is a placeholder: we
+    // don't use SNI (identity is pinned via cert hashes + Noise), but rustls requires a
+    // syntactically valid name.
+    let quic_connection = holder.dial_quic(socket_addr, client_config, "l")?.await?;
 
     // Some libp2p WebTransport servers (notably go-libp2p, and browsers) speak the older
     // WebTransport-over-HTTP/3 draft-02 and require this header on the CONNECT request. wtransport
@@ -944,7 +1084,10 @@ async fn connect(
     let options = ConnectOptions::builder(&url)
         .add_header("sec-webtransport-http3-draft02", "1")
         .build();
-    let connection = endpoint.connect(options).await?;
+    // Drive the WebTransport (H3 CONNECT) session over the QUIC connection we just established on
+    // the shared endpoint. This is the fork's client-side counterpart to the server's
+    // `with_quic_connecting` hook.
+    let connection = connect_over_quic(quic_connection, options).await?;
 
     // The first bidirectional stream carries the libp2p Noise handshake directly (no
     // multistream-select). The dialer is the Noise initiator.
@@ -1095,17 +1238,26 @@ mod test {
             alpn_protocols(),
         );
         let quic_params = Config::new(&keypair, certs[0].clone()).quic_params();
-        let server_config = ServerConfig::builder()
-            .with_bind_socket(socket)
-            .with_custom_tls_and_transport(tls, quic_params.build())
-            .build();
-        let endpoint = wtransport::Endpoint::server(server_config).unwrap();
-        let local_addr = endpoint.local_addr().unwrap();
+        let server_config = make_quinn_server_config(tls, quic_params.build()).unwrap();
+        let holder = Arc::new(new_holder(socket).unwrap());
+        let (sink, inbound) = mpsc::channel(INBOUND_QUEUE_LEN);
+        holder
+            .register(
+                WEBTRANSPORT_ALPN.to_vec(),
+                alpn_protocols(),
+                Arc::new(server_config),
+                sink,
+                false,
+            )
+            .unwrap();
+        let local_addr = holder.local_addr();
 
         let mut listener = Listener::new(
             ListenerId::next(),
             local_addr,
-            endpoint,
+            holder,
+            true,
+            inbound,
             &keypair,
             certs,
             quic_params,
@@ -1147,36 +1299,152 @@ mod test {
         DialOpts { role, port_use }
     }
 
-    #[test]
-    fn dial_holepunch_new_port_rejected() {
+    // Building a dialer `quinn::Endpoint` requires a Tokio reactor, so the (role, port_use) matrix
+    // tests now run under `#[tokio::test]`. Each returns `Ok` (the future is not awaited, so no
+    // network I/O happens): we only assert that `dial()` selects an endpoint and returns a dial
+    // future without erroring.
+
+    #[tokio::test]
+    async fn dial_holepunch_new_port_now_supported() {
+        // DRIVER A: `(Listener, New)` (a coordinated DCUtR hole-punch) is no longer rejected with
+        // `HolePunchingUnsupported`. With the shared `quinn::Endpoint` we can dial from the
+        // listener's socket. Without a listener present it best-effort dials from a fresh socket,
+        // but either way it must NOT be a synchronous hole-punch error.
         let (mut transport, addr) = transport_and_dial_addr();
         let res = transport.dial(addr, dial_opts(CoreEndpoint::Listener, PortUse::New));
-        assert!(matches!(
-            res,
-            Err(TransportError::Other(Error::HolePunchingUnsupported))
-        ));
+        assert!(res.is_ok());
     }
 
-    #[test]
-    fn dial_listener_reuse_proceeds() {
-        // Guards the F1 fix: `(Listener, Reuse)` (what DCUtR emits) must NOT be a hole-punch error.
+    #[tokio::test]
+    async fn dial_listener_reuse_proceeds() {
+        // `(Listener, Reuse)` (what DCUtR emits) must dial successfully (no hole-punch error).
         let (mut transport, addr) = transport_and_dial_addr();
         let res = transport.dial(addr, dial_opts(CoreEndpoint::Listener, PortUse::Reuse));
         assert!(res.is_ok());
     }
 
-    #[test]
-    fn dial_dialer_reuse_proceeds() {
+    #[tokio::test]
+    async fn dial_dialer_reuse_proceeds() {
         let (mut transport, addr) = transport_and_dial_addr();
         let res = transport.dial(addr, dial_opts(CoreEndpoint::Dialer, PortUse::Reuse));
         assert!(res.is_ok());
     }
 
-    #[test]
-    fn dial_dialer_new_proceeds() {
+    #[tokio::test]
+    async fn dial_dialer_new_proceeds() {
         let (mut transport, addr) = transport_and_dial_addr();
         let res = transport.dial(addr, dial_opts(CoreEndpoint::Dialer, PortUse::New));
         assert!(res.is_ok());
+    }
+
+    /// Drive a `Transport` to a bound listener, returning the transport and the listener's bound
+    /// `SocketAddr`. Used by the socket-reuse tests below.
+    async fn transport_with_listener() -> (Transport, SocketAddr) {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        transport
+            .listen_on(
+                ListenerId::next(),
+                "/ip4/127.0.0.1/udp/0/quic-v1/webtransport".parse().unwrap(),
+            )
+            .unwrap();
+        // Drive the listener to its `NewAddress` so the bound port is known. The advertised address
+        // carries `/certhash` components, so extract ip/udp directly rather than via the
+        // listen-address parser (which rejects certhashes).
+        let listen_addr = match poll_fn(|cx| Pin::new(&mut transport).poll(cx)).await {
+            TransportEvent::NewAddress { listen_addr, .. } => listen_addr,
+            e => panic!("unexpected event: {e:?}"),
+        };
+        let mut ip = None;
+        let mut port = None;
+        for p in listen_addr.iter() {
+            match p {
+                Protocol::Ip4(a) => ip = Some(IpAddr::V4(a)),
+                Protocol::Ip6(a) => ip = Some(IpAddr::V6(a)),
+                Protocol::Udp(p) => port = Some(p),
+                _ => {}
+            }
+        }
+        let sa = SocketAddr::new(
+            ip.expect("ip in listen addr"),
+            port.expect("udp in listen addr"),
+        );
+        (transport, sa)
+    }
+
+    // A `PortUse::Reuse` WebTransport dial against an existing listener dials from the
+    // listener's endpoint holder, i.e. the same UDP socket/port. This is the prerequisite for
+    // hole punching: the punch machinery operates on the listener socket, and the reuse arms
+    // route the dial through that socket so the NAT 4-tuple is preserved.
+    #[tokio::test]
+    async fn reuse_dial_uses_listener_socket() {
+        let (transport, listener_sa) = transport_with_listener().await;
+
+        // The holder selected for a loopback reuse dial must be the listener's, bound to the same
+        // port the listener is listening on.
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listener_sa.port());
+        let holder = transport
+            .eligible_listener_holder(&target)
+            .expect("a loopback listener is eligible for a loopback reuse dial");
+        assert_eq!(
+            holder.local_addr().port(),
+            listener_sa.port(),
+            "reuse dial holder shares the listener's UDP port"
+        );
+    }
+
+    // The `(Listener, New)` hole-punch dial also routes through the listener's holder (formerly
+    // rejected outright). Same-socket selection is what lets the WT session ride the
+    // hole-punched path.
+    #[tokio::test]
+    async fn holepunch_dial_uses_listener_socket() {
+        let (mut transport, listener_sa) = transport_with_listener().await;
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listener_sa.port());
+
+        // The dial's selected holder (reused listener) shares the port. We assert via the same
+        // selection helper the dial uses for `(Listener, New)`.
+        let holder = transport
+            .eligible_listener_holder(&target)
+            .expect("listener eligible");
+        assert_eq!(holder.local_addr().port(), listener_sa.port());
+
+        // And the full `dial()` path for `(Listener, New)` returns a dial future (no
+        // `HolePunchingUnsupported`).
+        let hashes = vec![generate_keypair_and_cert().1.cert_hash()];
+        let dial_addr = socketaddr_to_multiaddr_with_hashes(&target, &hashes).with(Protocol::P2p(
+            Keypair::generate_ed25519().public().to_peer_id(),
+        ));
+        let res = transport.dial(dial_addr, dial_opts(CoreEndpoint::Listener, PortUse::New));
+        assert!(
+            res.is_ok(),
+            "(Listener, New) must dial via the shared socket"
+        );
+    }
+
+    // Without a listener, a `PortUse::Reuse` dial falls back to a cached per-family ephemeral
+    // dialer holder and reuses it across dials (so repeated reuse dials share one socket),
+    // mirroring libp2p-quic's `dialer` map.
+    #[tokio::test]
+    async fn reuse_dial_without_listener_caches_dialer_holder() {
+        let (keypair, cert) = generate_keypair_and_cert();
+        let mut transport = Transport::new(Config::new(&keypair, cert));
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001);
+
+        let holder1 = transport.dialer_holder(target, true).unwrap();
+        let holder2 = transport.dialer_holder(target, true).unwrap();
+        assert_eq!(
+            holder1.local_addr(),
+            holder2.local_addr(),
+            "reuse dials without a listener share one cached ephemeral socket"
+        );
+
+        // A `PortUse::New` dial must NOT reuse the cached holder (fresh socket each time).
+        let holder_new = transport.dialer_holder(target, false).unwrap();
+        assert_ne!(
+            holder_new.local_addr().port(),
+            holder1.local_addr().port(),
+            "a New dial gets a fresh socket"
+        );
     }
 
     #[test]

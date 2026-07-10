@@ -59,6 +59,7 @@ members = [
     "transports/plaintext",
     "transports/pnet",
     "transports/quic",
+    "transports/quicreuse",
     "transports/tcp",
     "transports/tls",
     "transports/uds",
@@ -100,6 +101,7 @@ libp2p-ping = { version = "0.48.0", path = "protocols/ping" }
 libp2p-plaintext = { version = "0.44.0", path = "transports/plaintext" }
 libp2p-pnet = { version = "0.27.0", path = "transports/pnet" }
 libp2p-quic = { version = "0.14.0", path = "transports/quic" }
+libp2p-quicreuse = { version = "0.1.0", path = "transports/quicreuse" }
 libp2p-relay = { version = "0.22.0", path = "protocols/relay" }
 libp2p-rendezvous = { version = "0.18.0", path = "protocols/rendezvous" }
 libp2p-request-response = { version = "0.30.0", path = "protocols/request-response" }
@@ -174,11 +176,43 @@ libp2p-identity = { path = "identity" }
 # header before the pseudo-headers, violating RFC 9114 §4.3. go-libp2p (quic-go) then rejects the
 # WebTransport CONNECT request stream with H3_MESSAGE_ERROR, so native dials to go-libp2p fail.
 # (The companion lowercase-header-name fix lives in transports/webtransport/src/transport.rs.)
-# Pinned to our own fork carrying the fix from BiagioFesta/wtransport#310 — by rev, on a repo we
-# control, so the ref can't be force-pushed or deleted out from under us.
-# TODO: drop once a wtransport release contains the header-ordering fix.
-wtransport = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
-wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dc" }
+#
+# Pinned to our own fork carrying that header-ordering fix (BiagioFesta/wtransport#310) plus the
+# client-side `wtransport::endpoint::connect_over_quic` API (drives the H3/WebTransport handshake
+# over an externally-owned `quinn::Connection`), used together with the existing
+# `with_quic_connecting` server hook so WebTransport rides the shared libp2p-quic `quinn::Endpoint`.
+# Pinned by immutable rev on a repo we control so the ref can't be force-pushed or deleted out from
+# under us. TODO: upstream the fork APIs to BiagioFesta/wtransport and drop once released.
+#
+# NOTE: this fork branch also advances `wtransport`/`wtransport-proto` ahead of their crates.io
+# peers; both crates are pinned together to the same rev. A future de-fork must re-pin (or drop)
+# both in lockstep.
+wtransport = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dccaf32fb1189801303fa9740f335a" }
+wtransport-proto = { git = "https://github.com/mfw78/wtransport.git", rev = "49bba00150dccaf32fb1189801303fa9740f335a" }
+
+# quinn/quinn-proto fork exposing `Incoming::alpn()` / `server_name()` via a best-effort Initial
+# ClientHello peek, so a single shared `quinn::Endpoint` can select a per-ALPN `ServerConfig`
+# (libp2p mutual-auth for `libp2p`, no-client-auth for `h3`/WebTransport) BEFORE the handshake.
+# This is the keystone for single-port QUIC + WebTransport co-listening (epic #20).
+#
+# The shim touches only `quinn-proto` (the peek + `Incoming::alpn()`/`server_name()` accessors) and
+# `quinn` (which re-exports them), so ONLY those two crates are patched to the fork here; there is
+# deliberately no `quinn-udp` patch entry (the shim does not touch it). `quinn-udp` is still pulled
+# from the fork transitively, because the fork's `quinn` crate path-depends on its sibling
+# `quinn-udp` within the same git checkout — that is intrinsic to quinn's monorepo layout, not
+# something a [patch] entry controls. The fork branch also advances `quinn-proto` to 0.11.16, ahead
+# of its crates.io peer, so a future de-fork must re-pin BOTH `quinn` and `quinn-proto` in lockstep.
+#
+# Upstream direction (to drop this [patch] block): quinn PR #2671 "staged ClientHello acceptor for
+# ServerConfig selection" (closes #2024; prereq #2701 rustls-0.24). That replaces the best-effort
+# `Incoming::alpn()` peek with a staged acceptor that buffers the full ClientHello. See the
+# migration note at the top of `transports/quicreuse/src/lib.rs` — dropping the patch and porting
+# the accept loop to the staged-acceptor API MUST be a single atomic change (quinn 0.11.11
+# `Incoming` has no `alpn()`/`server_name()`, so a bare patch-drop will not compile) and needs
+# end-to-end re-validation (the staged acceptor changes routing to buffer the whole ClientHello,
+# fixing the PQC/large-ClientHello misroute).
+quinn = { git = "https://github.com/mfw78/quinn.git", rev = "d9635714f4909e574146c8cc04846bc36beb31df" }
+quinn-proto = { git = "https://github.com/mfw78/quinn.git", rev = "d9635714f4909e574146c8cc04846bc36beb31df" }
 
 [workspace.lints]
 rust.unreachable_pub = "warn"

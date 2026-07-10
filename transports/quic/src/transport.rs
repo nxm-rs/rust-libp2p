@@ -28,12 +28,13 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
 };
 
 use futures::{
-    channel::oneshot,
+    channel::{mpsc, oneshot},
     future::{BoxFuture, Either},
     prelude::*,
     ready,
@@ -46,6 +47,7 @@ use libp2p_core::{
     transport::{DialOpts, ListenerId, PortUse, TransportError, TransportEvent},
 };
 use libp2p_identity::PeerId;
+use libp2p_quicreuse::SharedQuicEndpoint;
 use socket2::{Domain, Socket, Type};
 
 use crate::{
@@ -54,6 +56,16 @@ use crate::{
     hole_punching::hole_puncher,
     provider::Provider,
 };
+
+/// The ALPN served by this transport, matching the allowlist that
+/// `libp2p_tls::make_server_config` puts in the TLS config.
+const LIBP2P_ALPN: &[u8] = b"libp2p";
+
+/// Capacity of the queue between an endpoint holder's accept loop and a [`Listener`].
+///
+/// The holder drops inbound connections instead of applying backpressure, so this bounds how
+/// large an accept burst survives a listener that is slow to be polled.
+const INBOUND_QUEUE_LEN: usize = 256;
 
 /// Implementation of the [`Transport`] trait for QUIC.
 ///
@@ -76,8 +88,11 @@ pub struct GenTransport<P: Provider> {
     support_draft_29: bool,
     /// Streams of active [`Listener`]s.
     listeners: SelectAll<Listener<P>>,
-    /// Dialer for each socket family if no matching listener exists.
-    dialer: HashMap<SocketFamily, quinn::Endpoint>,
+    /// Shared endpoint provided at construction, used by listeners and reuse-dials whose
+    /// address matches it.
+    shared_endpoint: Option<Arc<SharedQuicEndpoint>>,
+    /// Endpoint holder for each socket family if no matching listener exists.
+    dialer: HashMap<SocketFamily, Arc<SharedQuicEndpoint>>,
     /// Waker to poll the transport again when a new dialer or listener is added.
     waker: Option<Waker>,
     /// Holepunching attempts
@@ -88,6 +103,20 @@ pub struct GenTransport<P: Provider> {
 impl<P: Provider> GenTransport<P> {
     /// Create a new [`GenTransport`] with the given [`Config`].
     pub fn new(config: Config) -> Self {
+        Self::new_inner(config, None)
+    }
+
+    /// Create a new [`GenTransport`] that listens and reuse-dials through `shared`, co-listening
+    /// with the other protocols registered on the same endpoint.
+    ///
+    /// [`Transport::listen_on`] uses `shared` when the requested address matches its bound
+    /// address (an explicit port of `0` matches); other addresses fall back to a private
+    /// endpoint, exactly as with [`GenTransport::new`].
+    pub fn with_shared_endpoint(config: Config, shared: Arc<SharedQuicEndpoint>) -> Self {
+        Self::new_inner(config, Some(shared))
+    }
+
+    fn new_inner(config: Config, shared_endpoint: Option<Arc<SharedQuicEndpoint>>) -> Self {
         let handshake_timeout = config.handshake_timeout;
         let support_draft_29 = config.support_draft_29;
         let quinn_config = config.into();
@@ -95,6 +124,7 @@ impl<P: Provider> GenTransport<P> {
             listeners: SelectAll::new(),
             quinn_config,
             handshake_timeout,
+            shared_endpoint,
             dialer: HashMap::new(),
             waker: None,
             support_draft_29,
@@ -102,29 +132,33 @@ impl<P: Provider> GenTransport<P> {
         }
     }
 
-    /// Create a new [`quinn::Endpoint`] with the given configs.
-    fn new_endpoint(
+    /// Create a new private [`SharedQuicEndpoint`] on the given socket.
+    fn new_holder(
         endpoint_config: quinn::EndpointConfig,
-        server_config: Option<quinn::ServerConfig>,
         socket: UdpSocket,
-    ) -> Result<quinn::Endpoint, Error> {
+    ) -> Result<SharedQuicEndpoint, Error> {
         use crate::provider::Runtime;
         match P::runtime() {
             #[cfg(feature = "tokio")]
             Runtime::Tokio => {
-                let runtime = std::sync::Arc::new(quinn::TokioRuntime);
-                let endpoint =
-                    quinn::Endpoint::new(endpoint_config, server_config, socket, runtime)?;
-                Ok(endpoint)
+                SharedQuicEndpoint::new(endpoint_config, socket).map_err(holder_error)
             }
             Runtime::Dummy => {
                 let _ = endpoint_config;
-                let _ = server_config;
                 let _ = socket;
                 let err = std::io::Error::other("no async runtime found");
                 Err(Error::Io(err))
             }
         }
+    }
+
+    /// The shared endpoint, if it is bound to an address that can serve `socket_addr`.
+    fn matching_shared_endpoint(&self, socket_addr: SocketAddr) -> Option<Arc<SharedQuicEndpoint>> {
+        let shared = self.shared_endpoint.as_ref()?;
+        let local_addr = shared.local_addr();
+        (socket_addr.ip() == local_addr.ip()
+            && (socket_addr.port() == local_addr.port() || socket_addr.port() == 0))
+            .then(|| Arc::clone(shared))
     }
 
     /// Extract the addr, quic version and peer id from the given [`Multiaddr`].
@@ -195,7 +229,27 @@ impl<P: Provider> GenTransport<P> {
         Ok(socket.into())
     }
 
-    fn bound_socket(&mut self, socket_addr: SocketAddr) -> Result<quinn::Endpoint, Error> {
+    /// Endpoint holder for a reuse-dial towards `socket_addr` when no listener matches: the
+    /// shared endpoint if its socket family matches, else the per-family dialer cache.
+    fn reuse_dial_holder(
+        &mut self,
+        socket_addr: SocketAddr,
+    ) -> Result<Arc<SharedQuicEndpoint>, Error> {
+        let socket_family: SocketFamily = socket_addr.ip().into();
+        if let Some(shared) = &self.shared_endpoint
+            && SocketFamily::from(shared.local_addr().ip()) == socket_family
+        {
+            return Ok(Arc::clone(shared));
+        }
+        if let Some(occupied) = self.dialer.get(&socket_family) {
+            return Ok(Arc::clone(occupied));
+        }
+        let holder = self.bound_holder(socket_addr)?;
+        self.dialer.insert(socket_family, Arc::clone(&holder));
+        Ok(holder)
+    }
+
+    fn bound_holder(&mut self, socket_addr: SocketAddr) -> Result<Arc<SharedQuicEndpoint>, Error> {
         let socket_family = socket_addr.ip().into();
         if let Some(waker) = self.waker.take() {
             waker.wake();
@@ -206,8 +260,8 @@ impl<P: Provider> GenTransport<P> {
         };
         let socket = UdpSocket::bind(listen_socket_addr)?;
         let endpoint_config = self.quinn_config.endpoint_config.clone();
-        let endpoint = Self::new_endpoint(endpoint_config, None, socket)?;
-        Ok(endpoint)
+        let holder = Self::new_holder(endpoint_config, socket)?;
+        Ok(Arc::new(holder))
     }
 }
 
@@ -223,16 +277,41 @@ impl<P: Provider> Transport for GenTransport<P> {
         addr: Multiaddr,
     ) -> Result<(), TransportError<Self::Error>> {
         let (socket_addr, version, _peer_id) = self.remote_multiaddr_to_socketaddr(addr, false)?;
-        let endpoint_config = self.quinn_config.endpoint_config.clone();
-        let server_config = self.quinn_config.server_config.clone();
-        let socket = self.create_socket(socket_addr).map_err(Self::Error::from)?;
+        let server_config = Arc::new(self.quinn_config.server_config.clone());
 
-        let socket_c = socket.try_clone().map_err(Self::Error::from)?;
-        let endpoint = Self::new_endpoint(endpoint_config, Some(server_config), socket)?;
+        let (holder, socket, owns_holder) = match self.matching_shared_endpoint(socket_addr) {
+            Some(shared) => {
+                let socket = shared.try_clone_socket().map_err(Self::Error::from)?;
+                (shared, socket, false)
+            }
+            None => {
+                let socket = self.create_socket(socket_addr).map_err(Self::Error::from)?;
+                let socket_c = socket.try_clone().map_err(Self::Error::from)?;
+                let endpoint_config = self.quinn_config.endpoint_config.clone();
+                let holder = Self::new_holder(endpoint_config, socket)?;
+                (Arc::new(holder), socket_c, true)
+            }
+        };
+
+        let (sink, inbound) = mpsc::channel(INBOUND_QUEUE_LEN);
+        holder
+            // The libp2p/QUIC route carries the mutual-auth verifier, so it is the designated
+            // default: absent/unknown ALPNs fall back to it regardless of registration order.
+            .register(
+                LIBP2P_ALPN.to_vec(),
+                vec![LIBP2P_ALPN.to_vec()],
+                server_config,
+                sink,
+                true,
+            )
+            .map_err(holder_error)?;
+
         let listener = Listener::new(
             listener_id,
-            socket_c,
-            endpoint,
+            socket,
+            holder,
+            owns_holder,
+            inbound,
             self.handshake_timeout,
             version,
         )?;
@@ -271,27 +350,17 @@ impl<P: Provider> Transport for GenTransport<P> {
 
         match (dial_opts.role, dial_opts.port_use) {
             (Endpoint::Dialer, _) | (Endpoint::Listener, PortUse::Reuse) => {
-                let endpoint = if let Some(listener) = dial_opts
+                let holder = if let Some(listener) = dial_opts
                     .port_use
                     .eq(&PortUse::Reuse)
                     .then(|| self.eligible_listener(&socket_addr))
                     .flatten()
                 {
-                    listener.endpoint.clone()
+                    Arc::clone(&listener.holder)
+                } else if dial_opts.port_use == PortUse::Reuse {
+                    self.reuse_dial_holder(socket_addr)?
                 } else {
-                    let socket_family = socket_addr.ip().into();
-
-                    if dial_opts.port_use == PortUse::Reuse {
-                        if let Some(occupied) = self.dialer.get(&socket_family) {
-                            occupied.clone()
-                        } else {
-                            let endpoint = self.bound_socket(socket_addr)?;
-                            self.dialer.insert(socket_family, endpoint.clone());
-                            endpoint
-                        }
-                    } else {
-                        self.bound_socket(socket_addr)?
-                    }
+                    self.bound_holder(socket_addr)?
                 };
                 let handshake_timeout = self.handshake_timeout;
                 let mut client_config = self.quinn_config.client_config.clone();
@@ -302,8 +371,8 @@ impl<P: Provider> Transport for GenTransport<P> {
                     // This `"l"` seems necessary because an empty string is an invalid domain
                     // name. While we don't use domain names, the underlying rustls library
                     // is based upon the assumption that we do.
-                    let connecting = endpoint
-                        .connect_with(client_config, socket_addr, "l")
+                    let connecting = holder
+                        .dial_quic(socket_addr, client_config, "l")
                         .map_err(ConnectError)?;
                     Connecting::new(connecting, handshake_timeout).await
                 }))
@@ -415,6 +484,14 @@ impl From<Error> for TransportError<Error> {
     }
 }
 
+/// Maps an endpoint holder error onto this transport's error type.
+fn holder_error(err: libp2p_quicreuse::Error) -> Error {
+    match err {
+        libp2p_quicreuse::Error::Io(e) => Error::Io(e),
+        e => Error::Io(io::Error::other(e)),
+    }
+}
+
 /// Listener for incoming connections.
 struct Listener<P: Provider> {
     /// Id of the listener.
@@ -423,14 +500,19 @@ struct Listener<P: Provider> {
     /// Version of the supported quic protocol.
     version: ProtocolVersion,
 
-    /// Endpoint
-    endpoint: quinn::Endpoint,
+    /// Endpoint holder this listener registered on. Dials with [`PortUse::Reuse`] go through it
+    /// so they originate from the listening port.
+    holder: Arc<SharedQuicEndpoint>,
+
+    /// Whether the holder is private to this listener (created by `listen_on`) and must be
+    /// closed with it, as opposed to an externally shared endpoint that outlives the listener.
+    owns_holder: bool,
 
     /// An underlying copy of the socket to be able to hole punch with
     socket: UdpSocket,
 
-    /// A future to poll new incoming connections.
-    accept: BoxFuture<'static, Option<quinn::Incoming>>,
+    /// Inbound connections routed to this listener by the holder's accept loop.
+    inbound: mpsc::Receiver<quinn::Connecting>,
     /// Timeout for connection establishment on inbound connections.
     handshake_timeout: Duration,
 
@@ -455,7 +537,9 @@ impl<P: Provider> Listener<P> {
     fn new(
         listener_id: ListenerId,
         socket: UdpSocket,
-        endpoint: quinn::Endpoint,
+        holder: Arc<SharedQuicEndpoint>,
+        owns_holder: bool,
+        inbound: mpsc::Receiver<quinn::Connecting>,
         handshake_timeout: Duration,
         version: ProtocolVersion,
     ) -> Result<Self, Error> {
@@ -476,13 +560,11 @@ impl<P: Provider> Listener<P> {
             })
         }
 
-        let endpoint_c = endpoint.clone();
-        let accept = async move { endpoint_c.accept().await }.boxed();
-
         Ok(Listener {
-            endpoint,
+            holder,
+            owns_holder,
             socket,
-            accept,
+            inbound,
             listener_id,
             version,
             handshake_timeout,
@@ -500,7 +582,12 @@ impl<P: Provider> Listener<P> {
         if self.is_closed {
             return;
         }
-        self.endpoint.close(From::from(0u32), &[]);
+        self.holder.unregister(LIBP2P_ALPN);
+        if self.owns_holder {
+            // A private holder serves only this listener: closing it drops its connections
+            // immediately, exactly as closing a privately owned endpoint used to.
+            self.holder.close(From::from(0u32), &[]);
+        }
         self.pending_event = Some(TransportEvent::ListenerClosed {
             listener_id: self.listener_id,
             reason,
@@ -587,21 +674,8 @@ impl<P: Provider> Stream for Listener<P> {
                 return Poll::Ready(Some(event));
             }
 
-            match self.accept.poll_unpin(cx) {
-                Poll::Ready(Some(incoming)) => {
-                    let endpoint = self.endpoint.clone();
-                    self.accept = async move { endpoint.accept().await }.boxed();
-
-                    let connecting = match incoming.accept() {
-                        Ok(connecting) => connecting,
-                        Err(error) => {
-                            return Poll::Ready(Some(TransportEvent::ListenerError {
-                                listener_id: self.listener_id,
-                                error: Error::Connection(crate::ConnectionError(error)),
-                            }));
-                        }
-                    };
-
+            match self.inbound.poll_next_unpin(cx) {
+                Poll::Ready(Some(connecting)) => {
                     let local_addr = socketaddr_to_multiaddr(&self.socket_addr(), self.version);
                     let remote_addr = connecting.remote_address();
                     let send_back_addr = socketaddr_to_multiaddr(&remote_addr, self.version);

@@ -125,7 +125,12 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # List of URLs for allowed Git repositories
 allow-git = [
     # Temporary: our fork of wtransport carrying the HTTP/3 pseudo-header ordering fix
-    # (BiagioFesta/wtransport#310), pinned via [patch.crates-io] in Cargo.toml so native
-    # WebTransport can dial go-libp2p. Remove once a fixed wtransport is released on crates.io.
+    # (BiagioFesta/wtransport#310) plus the client-side `connect_over_quic` API, pinned by rev
+    # via [patch.crates-io] in Cargo.toml so native WebTransport can dial go-libp2p and share the
+    # libp2p-quic endpoint. Remove once a fixed wtransport is released on crates.io.
     "https://github.com/mfw78/wtransport",
+    # Temporary: our fork of quinn exposing `Incoming::alpn()` / `server_name()` (Initial
+    # ClientHello peek), pinned by rev via [patch.crates-io] so a shared quinn::Endpoint can select
+    # a per-ALPN ServerConfig (single-port QUIC + WebTransport co-listen). Remove once upstreamed.
+    "https://github.com/mfw78/quinn",
 ]

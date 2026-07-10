@@ -466,6 +466,40 @@ async fn test_local_listener_reuse() {
     assert_eq!(send_back_addr, a_listen_addr);
 }
 
+#[cfg(feature = "tokio")]
+#[tokio::test]
+async fn listen_via_shared_endpoint() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    let shared = Arc::new(quic::SharedQuicEndpoint::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let shared_port = shared.local_addr().port();
+
+    let keypair = generate_tls_keypair();
+    let a_peer_id = keypair.public().to_peer_id();
+    let mut a_transport = quic::GenTransport::<quic::tokio::Provider>::with_shared_endpoint(
+        quic::Config::new(&keypair),
+        Arc::clone(&shared),
+    )
+    .map(|(p, c), _| (p, StreamMuxerBox::new(c)))
+    .boxed();
+
+    let (_, mut b_transport) = create_default_transport::<quic::tokio::Provider>();
+
+    // A wildcard port on the shared endpoint's IP resolves to the shared endpoint.
+    let a_addr = start_listening(&mut a_transport, "/ip4/127.0.0.1/udp/0/quic-v1").await;
+    assert!(a_addr.iter().any(|p| p == Protocol::Udp(shared_port)));
+
+    let (_, (b_connected, _)) = connect(&mut a_transport, &mut b_transport, a_addr.clone()).await;
+    assert_eq!(b_connected, a_peer_id);
+
+    // Reuse-dials from the co-listening transport originate from the shared port.
+    let b_addr = start_listening(&mut b_transport, "/ip4/127.0.0.1/udp/0/quic-v1").await;
+    let ((_, a_send_back_addr, _), _) = connect(&mut b_transport, &mut a_transport, b_addr).await;
+    assert_eq!(a_send_back_addr, a_addr);
+}
+
 async fn smoke<P: Provider>() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

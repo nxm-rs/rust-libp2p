@@ -99,13 +99,34 @@
 //! # Ok::<(), libp2p_webtransport::CertificateError>(())
 //! ```
 //!
+//! # Shared endpoint, socket reuse & hole punching
+//!
+//! The transport obtains all its QUIC connections from a `libp2p-quicreuse` endpoint holder;
+//! `wtransport` acts purely as the WebTransport/H3 protocol engine over connections it did not
+//! establish (`IncomingSessionFuture::with_quic_connecting` inbound, `connect_over_quic`
+//! outbound) and never owns a socket. [`Transport::with_shared_endpoint`] accepts an externally
+//! shared holder, so WebTransport can co-listen with plain QUIC on **one UDP port**,
+//! demultiplexed by the negotiated ALPN (`h3` here, `libp2p` for raw QUIC). A transport built
+//! with [`Transport::new`] uses a private holder per listener instead.
+//!
+//! The holder's ALPN peek is a routing hint only. Each registered `ServerConfig` still enforces
+//! its own ALPN allowlist and its own client-auth policy: the `h3` route serves the
+//! certhash-pinned WebTransport certificate with no client auth, while the `libp2p` route keeps
+//! mutual TLS authentication. A misrouted connection therefore fails its handshake with an ALPN
+//! mismatch; it is never served under the wrong authentication policy.
+//!
+//! Dials are routed through a holder selected from the `(role, port_use)` tuple, exactly like
+//! `libp2p-quic`:
+//!
+//! * **`PortUse::Reuse`** (the default for ordinary dials, and what DCUtR's `override_role()` emits
+//!   as `(Listener, Reuse)`) dials from an existing listener's holder when one exists, i.e. the
+//!   listener's own UDP socket, preserving the NAT 4-tuple. Without a listener it reuses the
+//!   constructor-shared holder or a cached per-family ephemeral dialer holder.
+//! * **`(Listener, New)`** (a coordinated DCUtR hole-punch) also dials from the listener's holder,
+//!   so the WebTransport session rides the hole-punched path.
+//!
 //! # Limitations
 //!
-//! * **No DCUtR hole punching:** a coordinated hole-punch dial (`DialOpts { role:
-//!   Endpoint::Listener, port_use: PortUse::New, .. }`) fails with
-//!   [`Error::HolePunchingUnsupported`], because `wtransport`'s client endpoint cannot dial from
-//!   the listener's socket.
-//! * **`PortUse::Reuse` is not honoured:** ordinary dials always bind a fresh ephemeral socket.
 //! * **Only the `h3` ALPN is offered** by the server.
 //!
 //! [WebTransport]: https://www.w3.org/TR/webtransport/
@@ -175,6 +196,16 @@ pub enum Error {
     #[error(transparent)]
     StreamOpening(#[from] wtransport::error::StreamOpeningError),
 
+    /// Error while initiating the QUIC connection on the shared endpoint (before the WebTransport
+    /// handshake), e.g. an invalid client TLS/transport config.
+    #[error(transparent)]
+    QuicConnect(#[from] quinn::ConnectError),
+
+    /// Error while establishing the QUIC connection on the shared endpoint (before the WebTransport
+    /// handshake).
+    #[error(transparent)]
+    QuicConnection(#[from] quinn::ConnectionError),
+
     /// The multiaddr did not contain any certificate hashes, which are required to dial a
     /// libp2p WebTransport server that uses a self-signed certificate.
     #[error("Cannot dial a WebTransport address without certificate hashes")]
@@ -189,11 +220,10 @@ pub enum Error {
     #[error(transparent)]
     Config(#[from] ConfigError),
 
-    /// Coordinated hole punching (DCUtR) was requested by dialing with
-    /// `DialOpts { role: Endpoint::Listener, port_use: PortUse::New, .. }`, but this transport
-    /// cannot dial from the listener's socket: the underlying `wtransport` API only exposes
-    /// `connect` on a *client* endpoint, which always binds a fresh socket. Hole punching over
-    /// WebTransport is therefore unsupported.
+    /// Deprecated/retained for API stability: WebTransport hole-punch dials
+    /// (`DialOpts { role: Endpoint::Listener, port_use: PortUse::New, .. }`) are now supported by
+    /// dialing from the listener's shared `quinn::Endpoint`, so this variant is no longer returned.
+    /// It is kept only so existing `match` arms keep compiling.
     #[error("WebTransport does not support dialing as a listener (hole punching)")]
     HolePunchingUnsupported,
 }

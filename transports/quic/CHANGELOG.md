@@ -1,5 +1,19 @@
 ## 0.14.0
 
+- Document the single-port co-listening model: one UDP socket can serve plain QUIC (`libp2p`
+  ALPN, mutual auth) and WebTransport (`h3` ALPN) simultaneously, with the ALPN peek acting as a
+  routing hint that can never change the client-auth policy of the selected server config.
+  Cross-transport integration tests in `libp2p-webtransport` guard the inbound mutual-auth path
+  on a shared listener: a QUIC client presenting no client certificate, or a non-libp2p one, is
+  rejected by the TLS handshake exactly as on a dedicated socket.
+
+- Source `quinn` endpoints from a `libp2p-quicreuse` endpoint holder so QUIC can co-listen on
+  one UDP port with other ALPN-routed protocols. `GenTransport::with_shared_endpoint` accepts an
+  externally shared `SharedQuicEndpoint`, used for listeners and reuse-dials whose address
+  matches it. A transport built with `GenTransport::new` behaves as before through a private
+  single-protocol holder per listener and dialer; dialing, listening, port reuse, hole punching,
+  and the mutual-auth TLS configuration are unchanged.
+
 - Raise MSRV to 1.88.0.
   See [PR 6273](https://github.com/libp2p/rust-libp2p/pull/6273).
 
