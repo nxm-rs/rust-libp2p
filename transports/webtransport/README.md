@@ -8,6 +8,9 @@ WASM/browser nodes.
 Capabilities:
 
 - **Listen** for incoming WebTransport sessions (so a browser/WASM node can dial a native node).
+  The listen multiaddr may optionally end with `/p2p/<peer-id>`, which must match the local peer
+  id (a foreign peer id is rejected); the `/certhash` components are managed by the listener and
+  must not be supplied.
 - **Dial** other WebTransport endpoints (native → native).
 - Either peer of an established connection can open new bidirectional streams.
 - **Automatic certificate rotation**: listeners rotate to a fresh certificate before the active one

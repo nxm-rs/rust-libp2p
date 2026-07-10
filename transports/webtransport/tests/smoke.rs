@@ -197,6 +197,197 @@ async fn native_to_native_ping_pong() {
     assert_eq!(remote_on_dialer, listener_peer_id);
 }
 
+// B9: after the dialer closes its *send* (write) half, it must still read a full reply the
+// listener writes. Pre-fix, `poll_read` consulted the send-half close state and fabricated a clean
+// EOF (`Ok(0)`), truncating the read. This exercises the reachable path: a local `close()` of the
+// writer must not affect the recv half.
+#[tokio::test]
+async fn native_half_closed_read_after_send_close() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    const REPLY_LEN: usize = 4096;
+
+    let (listener_peer_id, mut listener) = create_transport();
+    let (_, mut dialer) = create_transport();
+
+    let listen_addr =
+        start_listening(&mut listener, "/ip4/127.0.0.1/udp/0/quic-v1/webtransport").await;
+    let dial_addr = listen_addr.with(Protocol::P2p(listener_peer_id));
+
+    let listener_task = async move {
+        loop {
+            if let TransportEvent::Incoming { upgrade, .. } = listener.select_next_some().await {
+                let (_remote, mut conn) = upgrade.await.map_err(|e| e.to_string())?;
+                let mut stream = future::poll_fn(|cx| {
+                    let _ = conn.poll_unpin(cx)?;
+                    conn.poll_inbound_unpin(cx)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+
+                // Read the dialer's PING, then send a large reply *after* the dialer has closed its
+                // writer. Keep the connection alive so the dialer can drain it.
+                let mut buf = [0u8; 4];
+                stream
+                    .read_exact(&mut buf)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                assert_eq!(&buf, b"PING");
+                let reply = vec![0xABu8; REPLY_LEN];
+                stream.write_all(&reply).await.map_err(|e| e.to_string())?;
+                stream.flush().await.map_err(|e| e.to_string())?;
+                // Close our writer too so the dialer eventually observes a genuine recv FIN.
+                stream.close().await.map_err(|e| e.to_string())?;
+                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                return Ok::<(), String>(());
+            }
+        }
+    };
+
+    let dialer_task = async move {
+        let (_remote, mut conn) = dialer
+            .dial(
+                dial_addr,
+                DialOpts {
+                    role: Endpoint::Dialer,
+                    port_use: PortUse::Reuse,
+                },
+            )
+            .map_err(|e| format!("{e:?}"))?
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut stream = future::poll_fn(|cx| {
+            let _ = conn.poll_unpin(cx)?;
+            conn.poll_outbound_unpin(cx)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        stream.write_all(b"PING").await.map_err(|e| e.to_string())?;
+        stream.flush().await.map_err(|e| e.to_string())?;
+        // Close the *send* half. Reads must remain unaffected.
+        stream.close().await.map_err(|e| e.to_string())?;
+
+        // A write after close must error (the send half really is closed).
+        assert!(
+            stream.write_all(b"X").await.is_err(),
+            "write after close must fail"
+        );
+
+        // The full 4 KiB reply must still be readable despite the closed send half.
+        let mut reply = vec![0u8; REPLY_LEN];
+        stream
+            .read_exact(&mut reply)
+            .await
+            .map_err(|e| format!("read after send-close failed: {e}"))?;
+        assert!(reply.iter().all(|&b| b == 0xAB), "reply payload intact");
+
+        // After draining + the peer's FIN, the next read is a genuine recv EOF (Ok(0)), sourced
+        // from quinn's recv half, not from the send-close state.
+        let mut tail = [0u8; 1];
+        let n = stream.read(&mut tail).await.map_err(|e| e.to_string())?;
+        assert_eq!(n, 0, "expected genuine recv FIN after draining");
+
+        Ok::<(), String>(())
+    };
+
+    futures::pin_mut!(listener_task);
+    futures::pin_mut!(dialer_task);
+    let (l, d) = tokio::time::timeout(Duration::from_secs(30), async {
+        futures::future::join(listener_task, dialer_task).await
+    })
+    .await
+    .expect("test timed out");
+    l.expect("listener side");
+    d.expect("dialer side");
+}
+
+// B9: a recv-half reset surfaces as an `Err`, not a clean EOF. The listener resets/drops its stream
+// without a clean FIN; the dialer's `read_exact` of a never-arriving payload must error.
+#[tokio::test]
+async fn native_recv_reset_is_error() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+
+    let (listener_peer_id, mut listener) = create_transport();
+    let (_, mut dialer) = create_transport();
+
+    let listen_addr =
+        start_listening(&mut listener, "/ip4/127.0.0.1/udp/0/quic-v1/webtransport").await;
+    let dial_addr = listen_addr.with(Protocol::P2p(listener_peer_id));
+
+    let listener_task = async move {
+        loop {
+            if let TransportEvent::Incoming { upgrade, .. } = listener.select_next_some().await {
+                let (_remote, mut conn) = upgrade.await.map_err(|e| e.to_string())?;
+                let mut stream = future::poll_fn(|cx| {
+                    let _ = conn.poll_unpin(cx)?;
+                    conn.poll_inbound_unpin(cx)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+
+                // Read the PING, then abruptly close the whole connection without a clean stream
+                // FIN, so the dialer sees a reset rather than EOF.
+                let mut buf = [0u8; 4];
+                stream
+                    .read_exact(&mut buf)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                drop(stream);
+                future::poll_fn(|cx| conn.poll_close_unpin(cx))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok::<(), String>(());
+            }
+        }
+    };
+
+    let dialer_task = async move {
+        let (_remote, mut conn) = dialer
+            .dial(
+                dial_addr,
+                DialOpts {
+                    role: Endpoint::Dialer,
+                    port_use: PortUse::Reuse,
+                },
+            )
+            .map_err(|e| format!("{e:?}"))?
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut stream = future::poll_fn(|cx| {
+            let _ = conn.poll_unpin(cx)?;
+            conn.poll_outbound_unpin(cx)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        stream.write_all(b"PING").await.map_err(|e| e.to_string())?;
+        stream.flush().await.map_err(|e| e.to_string())?;
+
+        // The listener resets the connection; a read of a never-arriving 4-byte reply must error,
+        // not return a clean EOF.
+        let mut buf = [0u8; 4];
+        let res = stream.read_exact(&mut buf).await;
+        assert!(res.is_err(), "recv reset must surface as Err, got {res:?}");
+        Ok::<(), String>(())
+    };
+
+    futures::pin_mut!(listener_task);
+    futures::pin_mut!(dialer_task);
+    let (_l, d) = tokio::time::timeout(Duration::from_secs(30), async {
+        futures::future::join(listener_task, dialer_task).await
+    })
+    .await
+    .expect("test timed out");
+    d.expect("dialer side");
+}
+
 /// Extract the `/certhash` components from a listen multiaddr.
 fn certhashes(addr: &Multiaddr) -> Vec<Protocol<'static>> {
     addr.iter()
