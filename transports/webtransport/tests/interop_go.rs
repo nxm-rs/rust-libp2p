@@ -24,11 +24,11 @@
 //!
 //! Two `wtransport` 0.7.1 bugs broke this direction; both are worked around so this test passes:
 //!
-//! 1. **HTTP/3 pseudo-header ordering.** `wtransport` stores CONNECT request headers in a
-//!    `HashMap` and QPACK-encodes them in hash order, so the `Sec-Webtransport-Http3-Draft02`
-//!    header that go-libp2p *requires* could be serialized *before* the `:`-pseudo-headers,
-//!    violating RFC 9114 §4.3. go-libp2p (quic-go) reset the request stream with `H3_MESSAGE_ERROR`
-//!    (270) and `wtransport` then self-closed (surfacing as `LocallyClosed`). Fixed by the
+//! 1. **HTTP/3 pseudo-header ordering.** `wtransport` stores CONNECT request headers in a `HashMap`
+//!    and QPACK-encodes them in hash order, so the `Sec-Webtransport-Http3-Draft02` header that
+//!    go-libp2p *requires* could be serialized *before* the `:`-pseudo-headers, violating RFC 9114
+//!    §4.3. go-libp2p (quic-go) reset the request stream with `H3_MESSAGE_ERROR` (270) and
+//!    `wtransport` then self-closed (surfacing as `LocallyClosed`). Fixed by the
 //!    `[patch.crates-io]` wtransport override in the workspace `Cargo.toml`
 //!    (BiagioFesta/wtransport#310); drop it once a fixed `wtransport` is released.
 //! 2. **Header-name casing.** HTTP/3 (RFC 9114 §4.2) requires lowercase field names; `wtransport`

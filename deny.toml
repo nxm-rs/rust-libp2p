@@ -123,5 +123,9 @@ unknown-git = "deny"
 # if not specified. If it is specified but empty, no registries are allowed.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # List of URLs for allowed Git repositories
-#allow-git = [
-#]
+allow-git = [
+    # Temporary: our fork of wtransport carrying the HTTP/3 pseudo-header ordering fix
+    # (BiagioFesta/wtransport#310), pinned via [patch.crates-io] in Cargo.toml so native
+    # WebTransport can dial go-libp2p. Remove once a fixed wtransport is released on crates.io.
+    "https://github.com/mfw78/wtransport",
+]
