@@ -20,25 +20,24 @@
 
 //! Interop test: a native rust-libp2p WebTransport node dials a **go-libp2p** WebTransport server.
 //!
-//! ## Known limitation (upstream `wtransport` bug, fixable)
+//! ## Requires a patched `wtransport` (temporary)
 //!
-//! This direction (native rust dialing a go-libp2p WebTransport *listener*) currently **fails** —
-//! but **not** because of a WebTransport draft mismatch (both sides speak draft-02-compatible
-//! framing and the HTTP/3 SETTINGS exchange succeeds). The cause is an HTTP/3 header-ordering bug
-//! in `wtransport` 0.7.1: it stores CONNECT request headers in a `HashMap` and its QPACK encoder
-//! emits them in hash order. When this dialer adds the `Sec-Webtransport-Http3-Draft02: 1` header
-//! (which go-libp2p *requires*), that regular header is serialized *before* the `:`-pseudo-headers,
-//! violating RFC 9114 §4.3. go-libp2p (quic-go) enforces the rule and resets the request stream
-//! with `H3_MESSAGE_ERROR` (0x10E / 270); `wtransport` then tears down its own connection, which
-//! surfaces as `Connect(ConnectionError(LocallyClosed))`. It is a catch-22: go requires the header,
-//! but `wtransport`'s only API to add it (`ConnectOptions::add_header`) corrupts pseudo-header
-//! ordering.
+//! Two `wtransport` 0.7.1 bugs broke this direction; both are worked around so this test passes:
 //!
-//! The fix is small and belongs upstream in `wtransport-proto` (make the CONNECT header collection
-//! order-preserving and always emit pseudo-headers first); a `[patch.crates-io]` fork can carry it
-//! in the interim. The reverse direction (go→this listener), browser→this listener, and
-//! native↔native all work, because only go enforces the ordering that `wtransport` violates. The
-//! CI job that runs this test is non-blocking until the `wtransport` fix lands.
+//! 1. **HTTP/3 pseudo-header ordering.** `wtransport` stores CONNECT request headers in a
+//!    `HashMap` and QPACK-encodes them in hash order, so the `Sec-Webtransport-Http3-Draft02`
+//!    header that go-libp2p *requires* could be serialized *before* the `:`-pseudo-headers,
+//!    violating RFC 9114 §4.3. go-libp2p (quic-go) reset the request stream with `H3_MESSAGE_ERROR`
+//!    (270) and `wtransport` then self-closed (surfacing as `LocallyClosed`). Fixed by the
+//!    `[patch.crates-io]` wtransport override in the workspace `Cargo.toml`
+//!    (BiagioFesta/wtransport#310); drop it once a fixed `wtransport` is released.
+//! 2. **Header-name casing.** HTTP/3 (RFC 9114 §4.2) requires lowercase field names; `wtransport`
+//!    encodes them verbatim, so the dialer sends the header name lowercased
+//!    (`transports/webtransport/src/transport.rs`).
+//!
+//! Neither was a WebTransport *draft* mismatch — both sides speak draft-02-compatible framing and
+//! the HTTP/3 SETTINGS exchange succeeds. With the patch + lowercase fix, all four directions
+//! (native↔native, browser→native, go→native, native→go) interoperate.
 //!
 //! The go server is the `wasm-tests/webtransport-tests/echo-server` (go-libp2p), which advertises
 //! its multiaddr over HTTP on `127.0.0.1:4455`. This is ignored by default because it requires

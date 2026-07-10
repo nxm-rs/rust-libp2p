@@ -7612,7 +7612,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -8245,8 +8245,7 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 [[package]]
 name = "wtransport"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea4aacf790813ee1956751491800537f4e04af7557b7b370501ccbfbc85963e4"
+source = "git+https://github.com/mfw78/wtransport.git?rev=8ebdde112e3e7dd558e662a2e7ebc147e2547112#8ebdde112e3e7dd558e662a2e7ebc147e2547112"
 dependencies = [
  "bytes",
  "pem",
@@ -8269,8 +8268,7 @@ dependencies = [
 [[package]]
 name = "wtransport-proto"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5867c629e4252f7439d82315923daaf27f4fa442410d51b78ab93ef4c432a11"
+source = "git+https://github.com/mfw78/wtransport.git?rev=8ebdde112e3e7dd558e662a2e7ebc147e2547112#8ebdde112e3e7dd558e662a2e7ebc147e2547112"
 dependencies = [
  "httlib-huffman",
  "octets",

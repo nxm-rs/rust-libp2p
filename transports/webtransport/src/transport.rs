@@ -566,9 +566,13 @@ async fn connect(
     // Some libp2p WebTransport servers (notably go-libp2p, and browsers) speak the older
     // WebTransport-over-HTTP/3 draft-02 and require this header on the CONNECT request. wtransport
     // itself does not send it, so we add it explicitly; servers that don't need it ignore it.
+    //
+    // The field name MUST be lowercase: HTTP/3 (RFC 9114 §4.2) requires lowercase field names on
+    // the wire, and go-libp2p (quic-go) rejects the CONNECT stream otherwise. (wtransport encodes
+    // the name verbatim rather than lowercasing it.)
     let url = format!("https://{socket_addr}{WEBTRANSPORT_PATH}");
     let options = ConnectOptions::builder(&url)
-        .add_header("Sec-Webtransport-Http3-Draft02", "1")
+        .add_header("sec-webtransport-http3-draft02", "1")
         .build();
     let connection = endpoint.connect(options).await?;
 

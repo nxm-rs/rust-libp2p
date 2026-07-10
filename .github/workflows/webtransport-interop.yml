@@ -41,20 +41,16 @@ jobs:
       - name: Run native ping-pong test
         run: cargo test -p libp2p-webtransport --test smoke
 
-  # rust-native -> go-libp2p (KNOWN LIMITATION, non-blocking).
+  # rust-native -> go-libp2p.
   # Builds the go-libp2p echo-server and runs the (ignored) `interop_go` test,
   # which spawns the binary and dials it from a native rust node.
   #
-  # This currently fails due to an upstream wtransport 0.7.1 bug (NOT a draft
-  # mismatch): wtransport stores CONNECT headers in a HashMap and QPACK-encodes
-  # them in hash order, so the required `Sec-Webtransport-Http3-Draft02` header
-  # is emitted before the `:`-pseudo-headers, violating RFC 9114 §4.3. go-libp2p
-  # resets the stream with H3_MESSAGE_ERROR (270) and wtransport self-closes
-  # (`LocallyClosed`). Fixable upstream / via a [patch.crates-io] fork. The other
-  # three directions (go->native, browser->native, native<->native) pass, so this
-  # job is informational and does not block the workflow.
+  # Passes via two fixes: the [patch.crates-io] wtransport override in the root
+  # Cargo.toml (fixes the HTTP/3 pseudo-header ordering, BiagioFesta/wtransport#310)
+  # and the lowercase draft-02 header name in the dialer. Drop the patch once a
+  # fixed wtransport is released on crates.io.
   native-to-go:
-    name: rust-native -> go-libp2p (known limitation)
+    name: rust-native -> go-libp2p
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -78,20 +74,10 @@ jobs:
         working-directory: wasm-tests/webtransport-tests/echo-server
         run: go build -o echo-server .
 
-      - name: Dial go-libp2p from a native rust node (known limitation, non-blocking)
+      - name: Dial go-libp2p from a native rust node
         env:
           GO_ECHO_SERVER: ${{ github.workspace }}/wasm-tests/webtransport-tests/echo-server/echo-server
-        # Fails due to an upstream wtransport 0.7.1 HTTP/3 header-ordering bug (the required
-        # draft02 header is QPACK-encoded before the pseudo-headers, so go resets the stream with
-        # H3_MESSAGE_ERROR). Tracked, not a regression; surface it as a warning rather than failing
-        # the run. When wtransport is fixed (or a [patch.crates-io] fork lands), this passes and the
-        # soft-fail can be dropped.
-        run: |
-          if cargo test -p libp2p-webtransport --test interop_go -- --ignored --nocapture; then
-            echo "rust-native -> go-libp2p interop PASSED (wtransport header-ordering fix landed — drop the soft-fail)"
-          else
-            echo "::warning title=Known limitation::rust-native -> go-libp2p fails on an upstream wtransport HTTP/3 header-ordering bug (pseudo-headers must precede regular headers, RFC 9114 4.3); tracked and non-blocking."
-          fi
+        run: cargo test -p libp2p-webtransport --test interop_go -- --ignored --nocapture
 
   # go-libp2p -> rust-native.
   # Runs the native rust echo_server example in the background (serving its
